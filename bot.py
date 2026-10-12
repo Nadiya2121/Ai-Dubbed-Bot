@@ -33,7 +33,7 @@ def auto_setup():
 
 auto_setup()
 
-# অটো-ইনস্টল সম্পন্ন হওয়ার পর লাইব্রেরিগুলো লোড করা হচ্ছে
+# লাইব্রেরি লোড করা
 import asyncio
 from dotenv import load_dotenv
 from pyrogram import Client, filters
@@ -44,7 +44,7 @@ import edge_tts
 import imageio_ffmpeg
 
 # =====================================================================
-# ২. কনফিগারেশন (আপনার তথ্যগুলো নিচে বসান অথবা সার্ভার ENV তে দিন)
+# ২. কনফিগারেশন (আপনার কীগুলো এখানে বসান অথবা .env ফাইলে রাখুন)
 # =====================================================================
 load_dotenv()
 
@@ -53,7 +53,7 @@ API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")              # আপনার
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")           # আপনার BOT TOKEN দিন
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_KEY")     # আপনার GROQ KEY দিন
 
-# স্বয়ংক্রিয়ভাবে FFmpeg পাথ নির্ধারণ (সিস্টেম অথবা পাইথন বিল্ট-ইন)
+# স্বয়ংক্রিয়ভাবে FFmpeg পাথ নিশ্চিত করা
 FFMPEG_PATH = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 
 app = Client("auto_dub_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -69,12 +69,13 @@ user_data = {}
 last_update_time = {}
 
 # =====================================================================
-# ৩. হেল্পার ফাংশন (লাইভ প্রগ্রেস বার ও ট্রান্সলেশন)
+# ৩. হেল্পার ফাংশন (লাইভ প্রগ্রেস বার ও অনুবাদ)
 # =====================================================================
 async def progress_bar(current, total, message, action_name):
     now = time.time()
     msg_id = message.id
 
+    # টেলিগ্রাম রেট লিমিট এড়াতে প্রতি ৩.৫ সেকেন্ড পর পর আপডেট
     if current != total and (now - last_update_time.get(msg_id, 0)) < 3.5:
         return
 
@@ -111,7 +112,7 @@ def translate_large_text(text, target_lang):
 # =====================================================================
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 স্বাগতম! আমাকে যেকোনো ভাষার ভিডিও পাঠান, আমি লাইভ প্রগ্রেস বার সহ ডাবিং করে দেব।")
+    await message.reply_text("👋 স্বাগতম! আমাকে যেকোনো ভাষার ভিডিও পাঠান, আমি ডাবিং করে দেব।")
 
 @app.on_message(filters.video | filters.document)
 async def handle_video(client, message):
@@ -125,16 +126,16 @@ async def handle_video(client, message):
 
     msg = await message.reply_text("⏳ ডাউনলোডের প্রস্তুতি নেওয়া হচ্ছে...")
     user_id = str(message.from_user.id)
-    input_video = f"{user_id}_input.mp4"
+    target_path = os.path.abspath(f"{user_id}_input.mp4")
 
-    # লাইভ প্রগ্রেস বার সহ ডাউনলোড
-    await client.download_media(
+    # ডাউনলোড এবং সঠিক আসল পাথ সংরক্ষণ
+    downloaded_path = await client.download_media(
         message, 
-        file_name=input_video,
+        file_name=target_path,
         progress=progress_bar,
         progress_args=(msg, "ভিডিও ডাউনলোড হচ্ছে")
     )
-    user_data[user_id] = input_video
+    user_data[user_id] = os.path.abspath(downloaded_path)
 
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("🇧🇩 বাংলা", callback_data="bn"),
@@ -153,26 +154,30 @@ async def process_dubbing(client, callback_query):
         return
 
     input_video = user_data[user_id]
-    extracted_audio = f"{user_id}_audio.mp3"
-    tts_audio = f"{user_id}_tts.mp3"
-    final_video = f"{user_id}_dubbed.mp4"
+    base_dir = os.path.dirname(input_video)
+    extracted_audio = os.path.join(base_dir, f"{user_id}_audio.mp3")
+    tts_audio = os.path.join(base_dir, f"{user_id}_tts.mp3")
+    final_video = os.path.join(base_dir, f"{user_id}_dubbed.mp4")
 
     status_msg = await callback_query.message.edit_text("⚙️ ডাবিং শুরু হচ্ছে...")
 
     try:
-        # ১. অডিও আলাদা (অটো FFmpeg দ্বারা)
+        # ১. অডিও আলাদা (Absolute Path সহ)
         await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▱▱▱] ২৫%\n🔹 অডিও আলাদা ও অপ্টিমাইজ করা হচ্ছে...")
-        subprocess.run([
+        res = subprocess.run([
             FFMPEG_PATH, "-y", "-i", input_video,
             "-vn", "-ar", "16000", "-ac", "1", "-b:a", "48k",
             extracted_audio
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ], capture_output=True, text=True)
+
+        if not os.path.exists(extracted_audio):
+            raise Exception("ভিডিও থেকে অডিও আলাদা করা যায়নি! ভিডিওতে কি সাউন্ড আছে?")
 
         # ২. Groq Cloud (Whisper AI)
         await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▱▱] ৫০%\n🔹 কথা থেকে টেক্সটে রূপান্তর হচ্ছে...")
         with open(extracted_audio, "rb") as file:
             transcription = groq_client.audio.transcriptions.create(
-                file=(extracted_audio, file.read()),
+                file=(os.path.basename(extracted_audio), file.read()),
                 model="whisper-large-v3",
                 response_format="text"
             )
@@ -189,7 +194,7 @@ async def process_dubbing(client, callback_query):
         communicate = edge_tts.Communicate(translated_text, voice)
         await communicate.save(tts_audio)
 
-        # ৪. ভিডিও রেন্ডারিং (অটো FFmpeg দ্বারা)
+        # ৪. ভিডিও রেন্ডারিং
         await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▰] ৯০%\n🔹 ভিডিও প্রস্তুত করা হচ্ছে...")
         subprocess.run([
             FFMPEG_PATH, "-y", "-i", input_video, "-i", tts_audio,
@@ -197,7 +202,7 @@ async def process_dubbing(client, callback_query):
             "-shortest", final_video
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # ৫. লাইভ প্রগ্রেস বার সহ টেলিগ্রামে আপলোড
+        # ৫. আপলোড
         await status_msg.edit_text("🚀 ভিডিও তৈরি শেষ! টেলিগ্রামে পাঠানো হচ্ছে...")
         await client.send_video(
             chat_id=callback_query.message.chat.id,
@@ -212,10 +217,13 @@ async def process_dubbing(client, callback_query):
         await callback_query.message.reply_text(f"❌ এরর: {str(e)}")
 
     finally:
-        # ডিস্ক খালি রাখা
+        # ডিস্ক খালি করার জন্য ফাইল ডিলিট
         for path in [input_video, extracted_audio, tts_audio, final_video]:
             if os.path.exists(path):
-                os.remove(path)
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
         if user_id in user_data:
             del user_data[user_id]
         try:
@@ -223,5 +231,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 অল-ইন-ওয়ান এআই ডাবিং বট প্রস্তুত এবং রানিং...")
+print("🚀 অল-ইন-ওয়ান AI ডাবিং বট পুরোপুরি প্রস্তুত ও রানিং...")
 app.run()
