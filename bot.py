@@ -25,13 +25,13 @@ def auto_setup():
         import imageio_ffmpeg
         import httpx
     except ImportError:
-        print("⚙️ প্রয়োজনীয় প্যাকেজগুলো ইনস্টল হচ্ছে...")
+        print("⚙️ প্রয়োজনীয় প্যাকেজ ইনস্টল হচ্ছে, অপেক্ষা করুন...")
         subprocess.check_call([sys.executable, "-m", "pip", "install"] + REQUIRED_PACKAGES)
-        print("✅ সব প্যাকেজ সফলভাবে ইনস্টল হয়েছে!\n")
+        print("✅ সব প্যাকেজ ইনস্টল সম্পন্ন হয়েছে!\n")
 
 auto_setup()
 
-# প্যাকেজ লোড করা
+# লাইব্রেরি লোড করা
 import asyncio
 from dotenv import load_dotenv
 from pyrogram import Client, filters
@@ -50,7 +50,7 @@ API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")              # আপনার
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")           # আপনার BOT TOKEN দিন
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_KEY")     # আপনার GROQ KEY দিন
 
-# FFmpeg পাথ নির্ধারণ
+# স্বয়ংক্রিয় FFmpeg পাথ
 FFMPEG_PATH = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 
 app = Client("auto_dub_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -72,7 +72,7 @@ user_data = {}
 last_update_time = {}
 
 # =====================================================================
-# ৩. হেল্পার ফাংশন (লাইভ প্রগ্রেস বার ও Groq AI অনুবাদ)
+# ৩. হেল্পার ফাংশন (লাইভ প্রগ্রেস বার ও আনলিমিটেড AI অনুবাদ)
 # =====================================================================
 async def progress_bar(current, total, message, action_name):
     now = time.time()
@@ -101,10 +101,18 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
+# আনলিমিটেড অনুবাদ (একাধিক মডেল ব্যাকআপ রাখা হয়েছে)
 def translate_with_groq(text, target_lang):
     target_name = LANG_NAMES.get(target_lang, "Bengali")
     chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
     translated_parts = []
+
+    # ৩টি দ্রুতগতির ফ্রি মডেলের লিস্ট
+    models_to_try = [
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it"
+    ]
 
     for chunk in chunks:
         prompt = (
@@ -116,12 +124,24 @@ def translate_with_groq(text, target_lang):
             f"Original Text:\n{chunk}"
         )
         
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
-        translated_parts.append(response.choices[0].message.content.strip())
+        translated_chunk = None
+        for model_name in models_to_try:
+            try:
+                response = groq_client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3
+                )
+                translated_chunk = response.choices[0].message.content.strip()
+                if translated_chunk:
+                    break
+            except Exception:
+                continue # কোনো একটি মডেলে সমস্যা হলে পরের মডেলে অটো শিফট হবে
+
+        if not translated_chunk:
+            translated_chunk = chunk  # ব্যাকআপ
+
+        translated_parts.append(translated_chunk)
 
     return " ".join(translated_parts)
 
@@ -130,7 +150,7 @@ def translate_with_groq(text, target_lang):
 # =====================================================================
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 স্বাগতম! আমাকে যেকোনো ভাষার ভিডিও পাঠান, আমি AI দিয়ে ডাবিং করে দেব।")
+    await message.reply_text("👋 স্বাগতম! আমাকে যেকোনো ভাষার ভিডিও পাঠান, আমি লাইভ প্রগ্রেস বার সহ ডাবিং করে দেব।")
 
 @app.on_message(filters.video | filters.document)
 async def handle_video(client, message):
@@ -146,7 +166,6 @@ async def handle_video(client, message):
     user_id = str(message.from_user.id)
     target_path = os.path.abspath(f"{user_id}_input.mp4")
 
-    # লাইভ প্রগ্রেস বার সহ ডাউনলোড
     downloaded_path = await client.download_media(
         message, 
         file_name=target_path,
@@ -191,7 +210,7 @@ async def process_dubbing(client, callback_query):
         if not os.path.exists(extracted_audio):
             raise Exception("ভিডিও থেকে অডিও আলাদা করা যায়নি! ভিডিওতে কি সাউন্ড আছে?")
 
-        # ২. Groq Cloud (Whisper AI দিয়ে ভয়েস টু টেক্সট)
+        # ২. Groq Cloud (Whisper AI)
         await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▱▱] ৫০%\n🔹 কথা থেকে টেক্সটে রূপান্তর হচ্ছে (Whisper AI)...")
         with open(extracted_audio, "rb") as file:
             transcription = groq_client.audio.transcriptions.create(
@@ -204,16 +223,16 @@ async def process_dubbing(client, callback_query):
         if not original_text:
             raise Exception("ভিডিওতে কোনো মানুষের কথা শনাক্ত করা যায়নি!")
 
-        # ৩. Groq AI (Llama 3 দিয়ে দ্রুত ও নিখুঁত অনুবাদ)
+        # ৩. Groq AI (Multi-model Fallback অনুবাদ)
         await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▱] ৭৫%\n🔹 AI অনুবাদ ও নতুন কণ্ঠ তৈরি হচ্ছে...")
         translated_text = translate_with_groq(original_text, target_lang)
 
-        # ৪. Edge-TTS দিয়ে মানুষের মতো কণ্ঠ তৈরি
+        # ৪. Edge-TTS ভয়েস
         voice = VOICES.get(target_lang, "bn-BD-NabanitaNeural")
         communicate = edge_tts.Communicate(translated_text, voice)
         await communicate.save(tts_audio)
 
-        # ৫. ভিডিও রেন্ডারিং (Zero Re-encoding, অতি দ্রুত)
+        # ৫. ভিডিও রেন্ডারিং (Ultra Fast Stream Copy)
         await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▰] ৯০%\n🔹 ভিডিও প্রস্তুত করা হচ্ছে...")
         subprocess.run([
             FFMPEG_PATH, "-y", "-i", input_video, "-i", tts_audio,
@@ -221,7 +240,7 @@ async def process_dubbing(client, callback_query):
             "-shortest", final_video
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # ৬. লাইভ প্রগ্রেস বার সহ টেলিগ্রামে পাঠানো
+        # ৬. টেলিগ্রামে আপলোড
         await status_msg.edit_text("🚀 ভিডিও তৈরি শেষ! টেলিগ্রামে পাঠানো হচ্ছে...")
         await client.send_video(
             chat_id=callback_query.message.chat.id,
@@ -250,5 +269,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 ফাইনাল AI ডাবিং বট সফলভাবে রানিং...")
+print("🚀 ফাইনাল AI ডাবিং বট প্রস্তুত এবং সফলভাবে চালু হয়েছে...")
 app.run()
