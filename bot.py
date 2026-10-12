@@ -1,7 +1,6 @@
 import sys
 import os
 import time
-import json
 import shutil
 import subprocess
 
@@ -13,7 +12,7 @@ REQUIRED_PACKAGES = [
     "tgcrypto==1.2.5",
     "groq>=0.11.0",
     "httpx==0.27.2",
-    "edge-tts>=6.1.15",    # লেটেস্ট ভার্সন যা ৪০৩ ব্লক বাইপাস করে
+    "edge-tts>=6.1.15",
     "python-dotenv==1.0.1",
     "imageio-ffmpeg==0.5.1"
 ]
@@ -56,11 +55,11 @@ FFMPEG_PATH = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 app = Client("auto_dub_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# সেরা মানুষের মতো AI ভয়েস (Natural Neural Voices)
+# মিষ্টি মানুষের মতো AI কণ্ঠ (Neural Voices)
 VOICES = {
-    "bn": "bn-BD-NabanitaNeural",  # মিষ্টি বাংলা কণ্ঠ
-    "hi": "hi-IN-MadhurNeural",    # সাবলীল হিন্দি কণ্ঠ
-    "en": "en-US-GuyNeural"        # পরিষ্কার আমেরিকান ইংরেজি
+    "bn": "bn-BD-NabanitaNeural",  # বাংলা
+    "hi": "hi-IN-MadhurNeural",    # হিন্দি
+    "en": "en-US-GuyNeural"        # ইংরেজি
 }
 
 LANG_NAMES = {
@@ -73,14 +72,28 @@ user_data = {}
 last_update_time = {}
 
 # =====================================================================
-# ৩. হেল্পার ফাংশন
+# ৩. হেল্পার ফাংশন (স্মার্ট মডেল সিলেক্টর ও প্রগ্রেস বার)
 # =====================================================================
-# ভিডিওর সঠিক সময় (Duration) সেকেন্ডে বের করা
+
+# 🧠 Groq-এর অ্যাক্টিভ মডেল স্বয়ংক্রিয়ভাবে খুঁজে বের করার ফাংশন
+def get_active_groq_model():
+    try:
+        # আপনার অ্যাকাউন্টে কোন মডেলগুলো সচল আছে তার তালিকা
+        available_models = [m.id for m in groq_client.models.list().data if "whisper" not in m.id.lower()]
+        
+        # সেরা মডেলটি খুঁজে নেওয়া
+        for pref in ["llama-3.3", "llama-3.1", "llama3-70b", "llama3-8b", "llama3", "mixtral", "gemma"]:
+            for m in available_models:
+                if pref in m.lower():
+                    return m
+        return available_models[0]
+    except Exception:
+        return "llama3-8b-8192"
+
+# ভিডিওর মোট সময় (Duration) পরিমাপ
 def get_video_duration(file_path):
     try:
-        cmd = [
-            FFMPEG_PATH, "-i", file_path
-        ]
+        cmd = [FFMPEG_PATH, "-i", file_path]
         result = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
         for line in result.stderr.split("\n"):
             if "Duration:" in line:
@@ -118,9 +131,11 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
-# কঠোর অনুবাদের ফাংশন (ভাষা কখনো ভুল হবে না)
+# অটো-ডিটেক্টেড মডেল দিয়ে নিখুঁত অনুবাদ
 def translate_with_groq(text, target_lang):
     target_name = LANG_NAMES.get(target_lang, "Bengali language only")
+    active_model = get_active_groq_model()  # লাইভ মডেল নেওয়া হলো
+    
     chunks = [text[i:i+3500] for i in range(0, len(text), 3500)]
     translated_parts = []
 
@@ -131,18 +146,18 @@ def translate_with_groq(text, target_lang):
         )
 
         response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=active_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": chunk}
             ],
-            temperature=0.1  # কম টেম্পারেচার দিলে মডেল কখনো ভুল ভাষা বেছে নেয় না
+            temperature=0.1
         )
         translated_parts.append(response.choices[0].message.content.strip())
 
     return " ".join(translated_parts)
 
-# রিয়েলিস্টিক মানুষের কণ্ঠ তৈরি
+# মানুষের মতো রিয়েলিস্টিক ভয়েস তৈরি
 async def generate_realistic_voice(text, target_lang, output_file):
     voice = VOICES.get(target_lang, "bn-BD-NabanitaNeural")
     communicate = edge_tts.Communicate(text, voice, rate="+0%", pitch="+0Hz")
@@ -202,7 +217,7 @@ async def process_dubbing(client, callback_query):
     status_msg = await callback_query.message.edit_text("⚙️ ডাবিং শুরু হচ্ছে...")
 
     try:
-        # ১. অরিজিনাল ভিডিওর দৈর্ঘ্য মাপা
+        # ১. অরিজিনাল ভিডিওর দৈর্ঘ্য জানা
         video_duration = get_video_duration(input_video)
 
         # ২. অডিও আলাদা করা
@@ -229,19 +244,17 @@ async def process_dubbing(client, callback_query):
         if not original_text:
             raise Exception("ভিডিওতে কোনো মানুষের কথা পাওয়া যায়নি!")
 
-        # ৪. সঠিক ভাষায় অনুবাদ
+        # ৪. Groq AI অটো-মডেল দিয়ে অনুবাদ
         await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▱] ৭৫%\n🔹 নিখুঁত অনুবাদ ও মানুষের কণ্ঠ তৈরি হচ্ছে...")
         translated_text = translate_with_groq(original_text, target_lang)
 
-        # ৫. মানুষের মতো রিয়েলিস্টিক ভয়েস তৈরি
+        # ৫. মানুষের মতো মিষ্টি কণ্ঠে ভয়েস তৈরি
         await generate_realistic_voice(translated_text, target_lang, tts_audio)
 
-        # ৬. ভিডিও রেন্ডারিং (ভিডিও এক সেকেন্ডও কাটা যাবে না!)
+        # ৬. সম্পূর্ণ ভিডিও মার্জিং (ভিডিওর এক সেকেন্ডও কাটা যাবে না)
         await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▰] ৯০%\n🔹 সম্পূর্ণ ভিডিও জোড়া লাগানো হচ্ছে...")
         
-        # -shortest বাদ দেওয়া হয়েছে এবং ভিডিওর মূল সাইজ অক্ষুণ্ণ রাখার কমান্ড
         if video_duration:
-            # অডিও ছোট হলেও ভিডিও পুরো চলবে
             subprocess.run([
                 FFMPEG_PATH, "-y", "-i", input_video, "-i", tts_audio,
                 "-filter_complex", f"[1:a]apad=whole_dur={video_duration}[a]",
@@ -256,7 +269,7 @@ async def process_dubbing(client, callback_query):
                 final_video
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # ৭. আপলোড
+        # ৭. টেলিগ্রামে আপলোড
         await status_msg.edit_text("🚀 ভিডিও প্রস্তুত! টেলিগ্রামে পাঠানো হচ্ছে...")
         await client.send_video(
             chat_id=callback_query.message.chat.id,
@@ -284,5 +297,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 ১০০% পারফেক্ট AI ডাবিং বট চালু হয়েছে...")
+print("🚀 ১০০% বুলেটপ্রুফ AI ডাবিং বট চালু হয়েছে...")
 app.run()
