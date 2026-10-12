@@ -1,4 +1,6 @@
 import os
+import time
+import math
 import subprocess
 import asyncio
 from dotenv import load_dotenv
@@ -8,7 +10,7 @@ from groq import Groq
 from deep_translator import GoogleTranslator
 import edge_tts
 
-# .env ফাইল থেকে কনফিগারেশন লোড করা
+# .env থেকে কনফিগারেশন লোড করা
 load_dotenv()
 
 API_ID = int(os.getenv("API_ID"))
@@ -26,7 +28,39 @@ VOICES = {
 }
 
 user_data = {}
+last_update_time = {}
 
+# 📊 লাইভ প্রগ্রেস বার বানানোর ফাংশন
+async def progress_bar(current, total, message, action_name):
+    now = time.time()
+    msg_id = message.id
+
+    # টেলিগ্রাম ব্লক এড়াতে প্রতি ৩.৫ সেকেন্ড পর পর বা ১০০% হলে আপডেট হবে
+    if current != total and (now - last_update_time.get(msg_id, 0)) < 3.5:
+        return
+
+    last_update_time[msg_id] = now
+
+    percentage = (current / total) * 100
+    bar_length = 10
+    filled = int((current / total) * bar_length)
+    bar = "▰" * filled + "▱" * (bar_length - filled)
+
+    current_mb = current / (1024 * 1024)
+    total_mb = total / (1024 * 1024)
+
+    text = (
+        f"⏳ **{action_name}...**\n\n"
+        f"[{bar}] {percentage:.1f}%\n"
+        f"📊 সাইজ: {current_mb:.1f} MB / {total_mb:.1f} MB"
+    )
+
+    try:
+        await message.edit_text(text)
+    except Exception:
+        pass
+
+# বড় টেক্সট অনুবাদ ফাংশন
 def translate_large_text(text, target_lang):
     chunks = [text[i:i+3000] for i in range(0, len(text), 3000)]
     translated_parts = []
@@ -37,7 +71,7 @@ def translate_large_text(text, target_lang):
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 স্বাগতম! আমাকে যেকোনো ভাষার ভিডিও পাঠান (সর্বোচ্চ ১.৫ জিবি), আমি ডাবিং করে দেব।")
+    await message.reply_text("👋 স্বাগতম! আমাকে যেকোনো ভাষার ভিডিও পাঠান, আমি লাইভ প্রগ্রেস বার সহ ডাবিং করে দেব।")
 
 @app.on_message(filters.video | filters.document)
 async def handle_video(client, message):
@@ -49,11 +83,17 @@ async def handle_video(client, message):
         await message.reply_text("⚠️ ফাইলটি অনেক বড়! ২ জিবির নিচের ভিডিও পাঠান।")
         return
 
-    msg = await message.reply_text("⏳ ভিডিও ডাউনলোড হচ্ছে...")
+    msg = await message.reply_text("⏳ ডাউনলোডের প্রস্তুতি নেওয়া হচ্ছে...")
     user_id = str(message.from_user.id)
     input_video = f"{user_id}_input.mp4"
 
-    await client.download_media(message, file_name=input_video)
+    # লাইভ ডাউনলোড প্রগ্রেস বার সহ ডাউনলোড
+    await client.download_media(
+        message, 
+        file_name=input_video,
+        progress=progress_bar,
+        progress_args=(msg, "ভিডিও ডাউনলোড হচ্ছে")
+    )
     user_data[user_id] = input_video
 
     markup = InlineKeyboardMarkup([
@@ -61,7 +101,7 @@ async def handle_video(client, message):
          InlineKeyboardButton("🇮🇳 হিন্দি", callback_data="hi"),
          InlineKeyboardButton("🇺🇸 ইংরেজি", callback_data="en")]
     ])
-    await msg.edit_text("ভিডিও ডাউনলোড হয়েছে! কোন ভাষায় ডাব করতে চান?", reply_markup=markup)
+    await msg.edit_text("✅ ডাউনলোড সম্পূর্ণ!\nএখন কোন ভাষায় ডাব করতে চান সিলেক্ট করুন:", reply_markup=markup)
 
 @app.on_callback_query()
 async def process_dubbing(client, callback_query):
@@ -69,7 +109,7 @@ async def process_dubbing(client, callback_query):
     target_lang = callback_query.data
 
     if user_id not in user_data:
-        await callback_query.message.edit_text("❌ ফাইল পাওয়া যায়নি!")
+        await callback_query.message.edit_text("❌ ফাইল পাওয়া যায়নি! আবার পাঠান।")
         return
 
     input_video = user_data[user_id]
@@ -77,10 +117,11 @@ async def process_dubbing(client, callback_query):
     tts_audio = f"{user_id}_tts.mp3"
     final_video = f"{user_id}_dubbed.mp4"
 
-    status_msg = await callback_query.message.edit_text("⚙️ প্রসেসিং শুরু হয়েছে...\n১/৪ অডিও আলাদা করা হচ্ছে...")
+    status_msg = await callback_query.message.edit_text("⚙️ ডাবিং শুরু হচ্ছে...")
 
     try:
-        # ১. FFmpeg: অডিও কম্প্রেশন
+        # ১. অডিও আলাদা
+        await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▱▱▱] ২৫%\n🔹 অডিও আলাদা ও কমপ্রেস করা হচ্ছে...")
         subprocess.run([
             "ffmpeg", "-y", "-i", input_video,
             "-vn", "-ar", "16000", "-ac", "1", "-b:a", "48k",
@@ -88,7 +129,7 @@ async def process_dubbing(client, callback_query):
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # ২. Groq Cloud (Whisper)
-        await status_msg.edit_text("⚙️ ২/৪ ভয়েস থেকে টেক্সটে রূপান্তর হচ্ছে...")
+        await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▱▱] ৫০%\n🔹 কথা থেকে টেক্সটে রূপান্তর হচ্ছে (Groq AI)...")
         with open(extracted_audio, "rb") as file:
             transcription = groq_client.audio.transcriptions.create(
                 file=(extracted_audio, file.read()),
@@ -100,31 +141,31 @@ async def process_dubbing(client, callback_query):
         if not original_text:
             raise Exception("ভিডিওতে কোনো কথা শনাক্ত করা যায়নি!")
 
-        # ৩. অনুবাদ
-        await status_msg.edit_text("⚙️ ৩/৪ অনুবাদ করা হচ্ছে...")
+        # ৩. অনুবাদ ও ভয়েস তৈরি
+        await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▱] ৭৫%\n🔹 অনুবাদ ও নতুন AI কণ্ঠ তৈরি হচ্ছে...")
         translated_text = translate_large_text(original_text, target_lang)
 
-        # ৪. Edge-TTS ভয়েস
-        await status_msg.edit_text("⚙️ ৪/৪ AI ভয়েস তৈরি করা হচ্ছে...")
         voice = VOICES.get(target_lang, "bn-BD-NabanitaNeural")
         communicate = edge_tts.Communicate(translated_text, voice)
         await communicate.save(tts_audio)
 
-        # ৫. ভিডিও রেন্ডারিং
-        await status_msg.edit_text("⚙️ নতুন ভিডিও ফাইল তৈরি হচ্ছে...")
+        # ৪. ভিডিও রেন্ডারিং
+        await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▰] ৯০%\n🔹 ভিডিওতে নতুন ডাবিং সাউন্ড যুক্ত করা হচ্ছে...")
         subprocess.run([
             "ffmpeg", "-y", "-i", input_video, "-i", tts_audio,
             "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0",
             "-shortest", final_video
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # ৬. টেলিগ্রামে আপলোড
-        await status_msg.edit_text("🚀 আপলোড হচ্ছে...")
+        # ৫. লাইভ আপলোড প্রগ্রেস বার সহ টেলিগ্রামে পাঠানো
+        await status_msg.edit_text("🚀 ভিডিও তৈরি শেষ! আপলোড শুরু হচ্ছে...")
         await client.send_video(
             chat_id=callback_query.message.chat.id,
             video=final_video,
             caption="🎉 ডাবিং সম্পন্ন হয়েছে!",
-            supports_streaming=True
+            supports_streaming=True,
+            progress=progress_bar,
+            progress_args=(status_msg, "ভিডিও আপলোড হচ্ছে")
         )
 
     except Exception as e:
@@ -136,7 +177,10 @@ async def process_dubbing(client, callback_query):
                 os.remove(path)
         if user_id in user_data:
             del user_data[user_id]
-        await status_msg.delete()
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
 
-print("Bot is running...")
+print("Live Progress Bar সহ বট চালু হয়েছে...")
 app.run()
