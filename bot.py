@@ -12,7 +12,8 @@ REQUIRED_PACKAGES = [
     "tgcrypto==1.2.5",
     "groq>=0.11.0",
     "httpx==0.27.2",
-    "edge-tts==6.1.10",
+    "edge-tts>=6.1.12",
+    "gtts>=2.5.0",
     "python-dotenv==1.0.1",
     "imageio-ffmpeg==0.5.1"
 ]
@@ -22,6 +23,7 @@ def auto_setup():
         import pyrogram
         import groq
         import edge_tts
+        import gtts
         import imageio_ffmpeg
         import httpx
     except ImportError:
@@ -37,6 +39,7 @@ from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from groq import Groq
+from gtts import gTTS
 import edge_tts
 import imageio_ffmpeg
 
@@ -72,7 +75,7 @@ user_data = {}
 last_update_time = {}
 
 # =====================================================================
-# ৩. হেল্পার ফাংশন (লাইভ প্রগ্রেস বার ও আনলিমিটেড AI অনুবাদ)
+# ৩. হেল্পার ফাংশন (লাইভ প্রগ্রেস বার, AI অনুবাদ ও নিরাপদ ভয়েস ইঞ্জিন)
 # =====================================================================
 async def progress_bar(current, total, message, action_name):
     now = time.time()
@@ -101,13 +104,12 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
-# আনলিমিটেড অনুবাদ (একাধিক মডেল ব্যাকআপ রাখা হয়েছে)
+# আনলিমিটেড AI অনুবাদ (Auto-Fallback)
 def translate_with_groq(text, target_lang):
     target_name = LANG_NAMES.get(target_lang, "Bengali")
     chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
     translated_parts = []
 
-    # ৩টি দ্রুতগতির ফ্রি মডেলের লিস্ট
     models_to_try = [
         "llama-3.1-8b-instant",
         "mixtral-8x7b-32768",
@@ -136,14 +138,34 @@ def translate_with_groq(text, target_lang):
                 if translated_chunk:
                     break
             except Exception:
-                continue # কোনো একটি মডেলে সমস্যা হলে পরের মডেলে অটো শিফট হবে
+                continue
 
         if not translated_chunk:
-            translated_chunk = chunk  # ব্যাকআপ
+            translated_chunk = chunk
 
         translated_parts.append(translated_chunk)
 
     return " ".join(translated_parts)
+
+# 🎙️ নিরাপদ ডুয়েল ভয়েস ইঞ্জিন (Edge-TTS + Google TTS Fallback)
+async def generate_speech_safe(text, target_lang, output_file):
+    # ১ম চেষ্টা: Microsoft Edge-TTS (উচ্চ কোয়ালিটি)
+    try:
+        voice = VOICES.get(target_lang, "bn-BD-NabanitaNeural")
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(output_file)
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 100:
+            return
+    except Exception:
+        pass
+
+    # ২য় চেষ্টা: Google TTS (ক্লাউড ব্লক এড়াতে ১০০% গ্যারান্টি ব্যাকআপ)
+    loop = asyncio.get_event_loop()
+    def run_gtts():
+        tts = gTTS(text=text, lang=target_lang, slow=False)
+        tts.save(output_file)
+
+    await loop.run_in_executor(None, run_gtts)
 
 # =====================================================================
 # ৪. টেলিগ্রাম বট হ্যান্ডলার
@@ -223,16 +245,14 @@ async def process_dubbing(client, callback_query):
         if not original_text:
             raise Exception("ভিডিওতে কোনো মানুষের কথা শনাক্ত করা যায়নি!")
 
-        # ৩. Groq AI (Multi-model Fallback অনুবাদ)
+        # ৩. Groq AI অনুবাদ
         await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▱] ৭৫%\n🔹 AI অনুবাদ ও নতুন কণ্ঠ তৈরি হচ্ছে...")
         translated_text = translate_with_groq(original_text, target_lang)
 
-        # ৪. Edge-TTS ভয়েস
-        voice = VOICES.get(target_lang, "bn-BD-NabanitaNeural")
-        communicate = edge_tts.Communicate(translated_text, voice)
-        await communicate.save(tts_audio)
+        # ৪. সুরক্ষিত ডুয়েল ভয়েস ইঞ্জিন
+        await generate_speech_safe(translated_text, target_lang, tts_audio)
 
-        # ৫. ভিডিও রেন্ডারিং (Ultra Fast Stream Copy)
+        # ৫. ভিডিও রেন্ডারিং
         await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▰] ৯০%\n🔹 ভিডিও প্রস্তুত করা হচ্ছে...")
         subprocess.run([
             FFMPEG_PATH, "-y", "-i", input_video, "-i", tts_audio,
@@ -269,5 +289,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 ফাইনাল AI ডাবিং বট প্রস্তুত এবং সফলভাবে চালু হয়েছে...")
+print("🚀 ফাইনাল AI ডাবিং বট সফলভাবে চালু হয়েছে...")
 app.run()
