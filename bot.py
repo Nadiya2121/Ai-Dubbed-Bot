@@ -86,7 +86,7 @@ last_update_time = {}
 TEMP_DIR = tempfile.gettempdir()
 
 # =====================================================================
-# ৩. ডাবিং ইঞ্জিন ফাংশন (VoiceStudio Style Active Pipeline)
+# ৩. ডাবিং ইঞ্জিন ফাংশন (Multi-Model Auto Fallback)
 # =====================================================================
 def get_media_duration(file_path):
     try:
@@ -120,11 +120,11 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
-# 🧠 সুপার ফাস্ট অনুবাদ ও চরিত্র বিশ্লেষণ (কোনো টাইমআউট ছাড়া)
+# 🧠 সুপার ফাস্ট অনুবাদ ও চরিত্র বিশ্লেষণ (সার্ভার বিজি থাকলে স্বয়ংক্রিয় ব্যাকআপ মডেল ব্যবহার করবে)
 def analyze_and_translate_audio(audio_path, target_lang):
     target_name = VOICE_MAP.get(target_lang, {}).get("name", "Bengali")
 
-    # ধাপ ১: অডিও সরাসরি গুগলে আপলোড (১ সেকেন্ড)
+    # ধাপ ১: অডিও গুগলে আপলোড করা
     file_size = os.path.getsize(audio_path)
     upload_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}"
     upload_headers = {
@@ -144,7 +144,7 @@ def analyze_and_translate_audio(audio_path, target_lang):
     file_name = file_info["file"]["name"]
     file_uri = file_info["file"]["uri"]
 
-    # ধাপ ২: ফাইলটি ACTIVE হওয়া পর্যন্ত অপেক্ষা করা (মাত্র ২-৫ সেকেন্ড)
+    # ধাপ ২: ফাইলটি ACTIVE হওয়া পর্যন্ত অপেক্ষা করা
     check_url = f"https://generativelanguage.googleapis.com/v1beta/{file_name}?key={GEMINI_API_KEY}"
     for _ in range(15):
         try:
@@ -155,9 +155,13 @@ def analyze_and_translate_audio(audio_path, target_lang):
             pass
         time.sleep(2)
 
-    # ধাপ ৩: জেমিনি দিয়ে দ্রুত ডায়ালগ ও চরিত্র বের করা (মাত্র ৫-১০ সেকেন্ড)
-    gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
-    gen_headers = {"Content-Type": "application/json"}
+    # ধাপ ৩: জেমিনির একাধিক ব্যাকআপ মডেল ট্রাই করা (কোনো মডেল বিজি থাকলে পরেরটা সাথে সাথে নিবে)
+    backup_models = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-flash-latest",
+        "gemini-1.5-flash"
+    ]
 
     prompt = f"""
     You are an expert film dubbing director.
@@ -189,17 +193,31 @@ def analyze_and_translate_audio(audio_path, target_lang):
         ]
     }
 
-    # ১২০ সেকেন্ড বড় টাইমআউট দেওয়া হয়েছে
-    response = requests.post(gen_url, headers=gen_headers, json=payload, timeout=120)
+    response = None
+    gen_headers = {"Content-Type": "application/json"}
 
-    # কাজ শেষ, গুগলের সার্ভার থেকে অডিও ফাইলটি ডিলিট করে ক্লিন করা
+    for model_name in backup_models:
+        gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            response = requests.post(gen_url, headers=gen_headers, json=payload, timeout=90)
+            # যদি ২০০ কোড আসে তার মানে সফল!
+            if response.status_code == 200:
+                break
+            # যদি ৫০৩ (বিজি) বা অন্য এরর দেয়, তবে পরের মডেলে যাবে
+            print(f"Model {model_name} busy ({response.status_code}), trying next...")
+            time.sleep(1)
+        except Exception:
+            continue
+
+    # কাজ শেষ, গুগলের সার্ভার থেকে অডিও ফাইলটি ডিলিট করা
     try:
         requests.delete(check_url, timeout=10)
     except Exception:
         pass
 
-    if response.status_code != 200:
-        raise Exception(f"Gemini Error ({response.status_code}): {response.text}")
+    if not response or response.status_code != 200:
+        err_msg = response.text if response else "গুগলের সাথে কানেক্ট করা যায়নি"
+        raise Exception(f"Gemini Error ({response.status_code if response else 'Fail'}): {err_msg}")
 
     res_json = response.json()
     try:
@@ -395,5 +413,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 ফাইনাল পারফেক্ট ডাবিং বট চালু হয়েছে...")
+print("🚀 মাল্টি-মডেল অটো-ব্যাকআপ ডাবিং বট চালু হয়েছে...")
 app.run()
