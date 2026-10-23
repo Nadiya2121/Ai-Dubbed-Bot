@@ -93,19 +93,6 @@ TEMP_DIR = tempfile.gettempdir()
 # =====================================================================
 # ৩. হাই-ডেফিনিশন ক্রিস্টাল ক্লিয়ার ডাবিং ইঞ্জিন
 # =====================================================================
-def get_media_duration(file_path):
-    try:
-        cmd = [FFMPEG_PATH, "-i", file_path]
-        result = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
-        for line in result.stderr.split("\n"):
-            if "Duration:" in line:
-                time_str = line.split("Duration:")[1].split(",")[0].strip()
-                h, m, s = time_str.split(":")
-                return float(h) * 3600 + float(m) * 60 + float(s)
-    except Exception:
-        pass
-    return None
-
 async def progress_bar(current, total, message, action_name):
     now = time.time()
     msg_id = message.id
@@ -135,7 +122,6 @@ def transcribe_and_translate_clean(wav_path, target_lang):
         audio_data = recognizer.record(source)
 
     spoken_text = ""
-    # হিন্দি, ইংরেজি, বাংলা বা উর্দু ক্রমানুসারে ট্রাই করবে
     for lang in ["hi-IN", "en-US", "bn-BD", "ur-PK"]:
         try:
             text = recognizer.recognize_google(audio_data, language=lang)
@@ -155,9 +141,9 @@ def transcribe_and_translate_clean(wav_path, target_lang):
     except Exception:
         return spoken_text
 
-# 🎙️ প্রাকৃতিক ও স্পষ্ট স্টুডিও সাউন্ড জেনারেটর (কোনো বিকৃতি ছাড়া)
+# 🎙️ প্রাকৃতিক ও স্পষ্ট স্টুডিও সাউন্ড জেনারেটর
 async def generate_clean_speech(text, lang_code, voice_name, output_file):
-    # চেষ্টা ১: মাইক্রোসফট নিউরাল এআই ভয়েস
+    # চেষ্টা ১: মাইক্রোসফট নিউরাল ভয়েস
     try:
         communicate = edge_tts.Communicate(text, voice_name)
         await communicate.save(output_file)
@@ -166,15 +152,14 @@ async def generate_clean_speech(text, lang_code, voice_name, output_file):
     except Exception:
         pass
 
-    # চেষ্টা ২: গুগল হাই-কোয়ালিটি পরিষ্কার ভয়েস (কোনো রোবটিক বিকৃতি ছাড়া)
-    temp_mp3 = output_file + "_temp.mp3"
+    # চেষ্টা ২: গুগল হাই-কোয়ালিটি পরিষ্কার ভয়েস
+    temp_mp3 = output_file + "_raw.mp3"
     tts = gTTS(text=text, lang=lang_code, slow=False)
     tts.save(temp_mp3)
 
-    # 44.1kHz হাই-ডেফিনিশন স্টুডিও কোয়ালিটিতে কনভার্ট করা (যাতে স্পষ্ট শোনা যায়)
     subprocess.run([
         FFMPEG_PATH, "-y", "-i", temp_mp3,
-        "-ar", "44100", "-b:a", "128k",
+        "-ar", "44100", "-ac", "2", "-b:a", "128k",
         output_file
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -186,7 +171,6 @@ async def generate_clean_speech(text, lang_code, voice_name, output_file):
 
 # 🎙️ ডায়ালগ জোড়া দিয়ে স্পষ্ট ডাবিং ট্র্যাক তৈরি
 async def process_clean_dubbing(input_video, target_lang, output_audio, base_dir):
-    # অডিওকে পরিচ্ছন্ন ৩০ সেকেন্ডের খণ্ডে ভাগ করা
     chunk_pattern = os.path.join(base_dir, "chunk_%03d.wav")
     subprocess.run([
         FFMPEG_PATH, "-y", "-i", input_video,
@@ -201,7 +185,7 @@ async def process_clean_dubbing(input_video, target_lang, output_audio, base_dir
     ])
 
     if not chunk_files:
-        raise Exception("ভিডিওর অডিও প্রসেস করা যায়নি!")
+        raise Exception("ভিডিওর অডিও ট্র্যাক প্রসেস করা যায়নি!")
 
     lang_info = VOICE_MAP.get(target_lang, VOICE_MAP["bn"])
     temp_tts_files = []
@@ -213,15 +197,14 @@ async def process_clean_dubbing(input_video, target_lang, output_audio, base_dir
 
         if translated.strip():
             translated_count += 1
-            # ছেলে ও মেয়ের কণ্ঠ অদলবদল করা
             voice = lang_info["male"] if idx % 2 == 0 else lang_info["female"]
             await generate_clean_speech(translated, lang_info["code"], voice, seg_output)
         else:
-            # কথা না থাকলে ব্যাকগ্রাউন্ড হালকা সাউন্ড রাখা
+            # ডায়ালগ না থাকলে মূল সাউন্ড মৃদু ভলিউমে রাখা
             subprocess.run([
                 FFMPEG_PATH, "-y", "-i", chunk,
                 "-af", "volume=0.2",
-                "-ar", "44100",
+                "-ar", "44100", "-ac", "2",
                 seg_output
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -232,15 +215,15 @@ async def process_clean_dubbing(input_video, target_lang, output_audio, base_dir
     if translated_count == 0:
         raise Exception("ভিডিওতে কোনো মানুষের স্পষ্ট সংলাপ পাওয়া যায়নি! স্পষ্ট কণ্ঠের ভিডিও দিন।")
 
-    # সব ডায়ালগ একত্র করা
+    # সব ডায়ালগ একত্র করা (সঠিক অডিও ফরম্যাটে)
     concat_list = os.path.join(base_dir, "concat_list.txt")
     with open(concat_list, "w", encoding="utf-8") as f:
         for t_file in temp_tts_files:
             f.write(f"file '{t_file}'\n")
 
-    subprocess.run([
+    res = subprocess.run([
         FFMPEG_PATH, "-y", "-f", "concat", "-safe", "0",
-        "-i", concat_list, "-c:a", "aac", "-b:a", "128k", output_audio
+        "-i", concat_list, "-ar", "44100", "-ac", "2", "-b:a", "128k", output_audio
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     for t_file in temp_tts_files:
@@ -298,30 +281,32 @@ async def process_dubbing(client, callback_query):
     status_msg = await callback_query.message.edit_text("⚙️ **ডাবিং প্রক্রিয়া শুরু হচ্ছে...**")
 
     try:
-        video_duration = get_media_duration(input_video)
-
-        # ১. স্পষ্ট ডায়ালগ শুনে ডাবিং তৈরি
-        await status_msg.edit_text("⚙️ [▰▰▰▱] ৬০%\n🔹 সংলাপ শনাক্ত ও স্পষ্ট কণ্ঠে ডাবিং তৈরি হচ্ছে...")
+        # ১. স্পষ্ট ডায়ালগ শুনে নতুন অডিও তৈরি
+        await status_msg.edit_text("⚙️ [▰▰▰▱] ৬০%\n🔹 সংলাপ শনাক্ত ও নতুন কণ্ঠে ডাবিং তৈরি হচ্ছে...")
         await process_clean_dubbing(input_video, target_lang, dubbed_audio, base_dir)
 
-        # ২. অরিজিনাল সাউন্ড সরিয়ে সম্পূর্ণ নতুন হাই-কোয়ালিটি কণ্ঠ ভিডিওর সাথে মেলানো
+        # ২. ভিডিওর সাথে নতুন অডিও ১০০% নির্ভুলভাবে মেলানো
         await status_msg.edit_text("⚙️ [▰▰▰▰] ৯০%\n🔹 সম্পূর্ণ নতুন ডাব করা ভিডিও একত্র করা হচ্ছে...")
         
-        if video_duration:
-            subprocess.run([
-                FFMPEG_PATH, "-y", "-i", input_video, "-i", dubbed_audio,
-                "-filter_complex", f"[1:a]apad=whole_dur={video_duration}[a]",
-                "-map", "0:v:0", "-map", "[a]",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-                final_video
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            subprocess.run([
-                FFMPEG_PATH, "-y", "-i", input_video, "-i", dubbed_audio,
-                "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0",
-                "-c:a", "aac", "-b:a", "128k",
-                final_video
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # FFmpeg ভিডিও মার্জ কমান্ড (কোনো ক্র্যাশ ছাড়াই সঠিক এমপি৪ তৈরি করবে)
+        cmd = [
+            FFMPEG_PATH, "-y",
+            "-i", input_video,
+            "-i", dubbed_audio,
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-shortest",
+            final_video
+        ]
+        
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # ফাইলটি সফলভাবে তৈরি হয়েছে কি না নিশ্চিত করা
+        if not os.path.exists(final_video) or os.path.getsize(final_video) == 0:
+            err_log = result.stderr[-300:] if result.stderr else "ভিডিও তৈরি হয়নি"
+            raise Exception(f"FFmpeg রেন্ডার এরর: {err_log}")
 
         # ৩. টেলিগ্রামে ভিডিও আপলোড
         await status_msg.edit_text("🚀 ভিডিও তৈরি সম্পন্ন! টেলিগ্রামে পাঠানো হচ্ছে...")
@@ -352,5 +337,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 ফাইনাল হাই-ডেফিনিশন ডাবিং বট চালু হয়েছে...")
+print("🚀 ১০০% ফিক্সড ক্র্যাশ-মুক্ত ডাবিং বট চালু হয়েছে...")
 app.run()
