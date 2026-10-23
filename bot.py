@@ -8,7 +8,7 @@ import traceback
 import subprocess
 
 # =====================================================================
-# ১. স্বয়ংক্রিয় প্যাকেজ ইনস্টলার (Gemini ছাড়া সম্পূর্ণ ফ্রি ইঞ্জিন)
+# ১. স্বয়ংক্রিয় প্যাকেজ ইনস্টলার
 # =====================================================================
 REQUIRED_PACKAGES = [
     "pyrogram==2.0.106",
@@ -47,7 +47,7 @@ import edge_tts
 import imageio_ffmpeg
 
 # =====================================================================
-# ২. কনফিগারেশন (কোনো Gemini API Key লাগবে না!)
+# ২. কনফিগারেশন
 # =====================================================================
 load_dotenv()
 
@@ -64,7 +64,7 @@ except Exception:
 
 app = Client("koyeb_dub_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ভাষা ও প্রাকৃতিক এআই নিউরাল কণ্ঠ
+# ভাষা ও নিউরাল কণ্ঠ
 VOICE_MAP = {
     "bn": {
         "name": "Bengali (বাংলা)",
@@ -91,7 +91,7 @@ last_update_time = {}
 TEMP_DIR = tempfile.gettempdir()
 
 # =====================================================================
-# ৩. সম্পূর্ণ অটোমেটিক ডাবিং ইঞ্জিন (Zero API Key Pipeline)
+# ৩. মাল্টি-ল্যাঙ্গুয়েজ অটোমেটিক ডাবিং ইঞ্জিন
 # =====================================================================
 def get_media_duration(file_path):
     try:
@@ -125,42 +125,44 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
-# 🧠 সরাসরি ফ্রি ভয়েস-টু-টেক্সট ও অনুবাদ ইঞ্জিন
-def transcribe_and_translate_auto(wav_path, target_lang):
+# 🧠 ভিডিওর আসল ভাষা (হিন্দি, ইংলিশ বা বাংলা) অটো শনাক্ত করে অনুবাদ
+def transcribe_and_translate_multilingual(wav_path, target_lang):
     recognizer = sr.Recognizer()
-    recognizer.energy_threshold = 300
-    recognizer.dynamic_energy_threshold = True
+    recognizer.energy_threshold = 200
 
     with sr.AudioFile(wav_path) as source:
         audio_data = recognizer.record(source)
 
-    # ১. ফ্রি গুগল স্পিচ দিয়ে কথা লেখায় রূপান্তর
     spoken_text = ""
-    try:
-        spoken_text = recognizer.recognize_google(audio_data)
-    except sr.UnknownValueError:
-        pass  # কোনো কথা না থাকলে বা শুধু মিউজিক থাকলে সমস্যা নেই
-    except Exception:
-        pass
+    # ভিডিওর ভাষা যাই হোক না কেন (হিন্দি, ইংরেজি, বাংলা বা উর্দু) সব ট্রাই করবে
+    try_languages = ["hi-IN", "en-US", "bn-BD", "ur-PK"]
+    for lang in try_languages:
+        try:
+            text = recognizer.recognize_google(audio_data, language=lang)
+            if text and len(text.strip()) > 1:
+                spoken_text = text.strip()
+                break
+        except Exception:
+            continue
 
-    if not spoken_text.strip():
+    if not spoken_text:
         return ""
 
-    # ২. ফ্রি ডিপ ট্রান্সলেটর দিয়ে লক্ষ্য ভাষায় অনুবাদ
-    lang_code = VOICE_MAP.get(target_lang, {}).get("code", "bn")
+    # নির্বাচিত ভাষায় অনুবাদ করা
+    target_code = VOICE_MAP.get(target_lang, {}).get("code", "bn")
     try:
-        translated_text = GoogleTranslator(source='auto', target=lang_code).translate(spoken_text)
+        translated_text = GoogleTranslator(source='auto', target=target_code).translate(spoken_text)
         return translated_text
     except Exception:
         return spoken_text
 
-# 🎙️ একাধিক খণ্ডে ভাগ করে অটোমেটিক জীবন্ত কণ্ঠে ডাব তৈরি
+# 🎙️ সম্পূর্ণ ভিডিওর ভাষা পরিবর্তন করে নতুন কণ্ঠে ডাব করা
 async def process_multispeaker_dubbing(input_video, target_lang, output_audio, base_dir):
-    # ১. অডিওকে নিখুঁত টাইমিং অনুযায়ী ১৫ সেকেন্ডের ছোট ছোট ডায়ালগ পার্টে ভাগ করা
+    # ১. ভিডিও থেকে অডিও বের করে ২৫ সেকেন্ডের খণ্ডে ভাগ করা (যাতে কোনো ডায়ালগ না কাটে)
     chunk_pattern = os.path.join(base_dir, "chunk_%03d.wav")
     subprocess.run([
         FFMPEG_PATH, "-y", "-i", input_video,
-        "-f", "segment", "-segment_time", "15",
+        "-f", "segment", "-segment_time", "25",
         "-vn", "-ar", "16000", "-ac", "1",
         chunk_pattern
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -171,26 +173,28 @@ async def process_multispeaker_dubbing(input_video, target_lang, output_audio, b
     ])
 
     if not chunk_files:
-        raise Exception("ভিডিওর অডিও ট্র্যাক প্রসেস করা সম্ভব হয়নি!")
+        raise Exception("ভিডিওর অডিও ট্র্যাক প্রসেস করা যায়নি!")
 
     lang_info = VOICE_MAP.get(target_lang, VOICE_MAP["bn"])
     temp_tts_files = []
+    translated_count = 0
 
-    # ২. প্রতি টুকরো অডিও শুনে অনুবাদ করে ছেলে ও মেয়ের মিষ্টি কণ্ঠে তৈরি
+    # ২. প্রতি খণ্ড অনুবাদ করে মিষ্টি ছেলে ও মেয়ের নতুন কণ্ঠ দেওয়া
     for idx, chunk in enumerate(chunk_files):
-        translated = transcribe_and_translate_auto(chunk, target_lang)
+        translated = transcribe_and_translate_multilingual(chunk, target_lang)
         seg_output = os.path.join(base_dir, f"seg_{idx}.mp3")
 
-        # ডায়ালগ থাকলে ছেলে ও মেয়ের কণ্ঠ অদলবদল করে ন্যাচারাল ডাবিং দেওয়া
         if translated.strip():
+            translated_count += 1
+            # ছেলে ও মেয়ের কণ্ঠ অদলবদল করে ন্যাচারাল ডাবিং দেওয়া
             voice = lang_info["male"] if idx % 2 == 0 else lang_info["female"]
             communicate = edge_tts.Communicate(translated, voice)
             await communicate.save(seg_output)
         else:
-            # ডায়ালগ না থাকলে (মিউজিক বা নীরবতা) অরিজিনাল অডিওকে হালকা সাউন্ডে রাখা
+            # যদি সত্যিই কোনো কথা না থাকে (শুধু ব্যাকগ্রাউন্ড মিউজিক)
             subprocess.run([
                 FFMPEG_PATH, "-y", "-i", chunk,
-                "-af", "volume=0.3",
+                "-af", "volume=0.15",
                 seg_output
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -198,7 +202,10 @@ async def process_multispeaker_dubbing(input_video, target_lang, output_audio, b
         if os.path.exists(chunk):
             os.remove(chunk)
 
-    # ৩. সব খণ্ড নিখুঁতভাবে একসাথে জোড়া লাগানো
+    if translated_count == 0:
+        raise Exception("ভিডিওতে কোনো মানুষের স্পষ্ট কথাবার্তা বা সংলাপ পাওয়া যায়নি! স্পষ্ট কণ্ঠ আছে এমন ভিডিও দিন।")
+
+    # ৩. সম্পূর্ণ নতুন অডিও একসাথে জোড়া লাগানো
     concat_list = os.path.join(base_dir, "concat_list.txt")
     with open(concat_list, "w", encoding="utf-8") as f:
         for t_file in temp_tts_files:
@@ -220,7 +227,7 @@ async def process_multispeaker_dubbing(input_video, target_lang, output_audio, b
 # =====================================================================
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 স্বাগতম! যেকোনো ১ থেকে ৩ মিনিটের ভিডিও পাঠান, কোনো এরর বা ঝামেলা ছাড়াই সম্পূর্ণ স্বয়ংক্রিয়ভাবে ডাব করে দেব।")
+    await message.reply_text("👋 স্বাগতম! হিন্দি, ইংরেজি বা যেকোনো ভাষার ভিডিও পাঠান, আমি ছেলে ও মেয়ের কণ্ঠে সম্পূর্ণ বাংলায় ডাব করে দেব।")
 
 @app.on_message(filters.video | filters.document)
 async def handle_video(client, message):
@@ -241,9 +248,9 @@ async def handle_video(client, message):
     user_data[user_id] = os.path.abspath(downloaded_path)
 
     markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇧🇩 বাংলা", callback_data="bn"),
-         InlineKeyboardButton("🇮🇳 হিন্দি", callback_data="hi"),
-         InlineKeyboardButton("🇺🇸 ইংরেজি", callback_data="en")]
+        [InlineKeyboardButton("🇧🇩 বাংলা ডাবিং", callback_data="bn"),
+         InlineKeyboardButton("🇮🇳 হিন্দি ডাবিং", callback_data="hi"),
+         InlineKeyboardButton("🇺🇸 ইংরেজি ডাবিং", callback_data="en")]
     ])
     await msg.edit_text("✅ ডাউনলোড সম্পন্ন!\nকোন ভাষায় ডাব করতে চান সিলেক্ট করুন:", reply_markup=markup)
 
@@ -266,12 +273,12 @@ async def process_dubbing(client, callback_query):
     try:
         video_duration = get_media_duration(input_video)
 
-        # ১. স্বয়ংক্রিয়ভাবে কথা শুনে ও অনুবাদ করে ভয়েস তৈরি (Gemini ছাড়া)
-        await status_msg.edit_text("⚙️ [▰▰▰▱] ৬০%\n🔹 কথা বিশ্লেষণ ও নতুন কণ্ঠ তৈরি হচ্ছে...")
+        # ১. স্বয়ংক্রিয়ভাবে মূল ভাষা শনাক্ত করে নতুন ভাষায় ডাবিং তৈরি
+        await status_msg.edit_text("⚙️ [▰▰▰▱] ৬০%\n🔹 সংলাপ শনাক্ত ও নতুন কণ্ঠে ডাবিং তৈরি হচ্ছে...")
         await process_multispeaker_dubbing(input_video, target_lang, dubbed_audio, base_dir)
 
-        # ২. ভিডিওর সাথে নিখুঁতভাবে টাইমিং সিঙ্ক করে জোড়া লাগানো
-        await status_msg.edit_text("⚙️ [▰▰▰▰] ৯০%\n🔹 সম্পূর্ণ ডাব করা ভিডিও একত্র করা হচ্ছে...")
+        # ২. অরিজিনাল সাউন্ড মুছে সম্পূর্ণ নতুন কণ্ঠ ভিডিওর সাথে মেলানো
+        await status_msg.edit_text("⚙️ [▰▰▰▰] ৯০%\n🔹 সম্পূর্ণ নতুন ডাব করা ভিডিও একত্র করা হচ্ছে...")
         
         if video_duration:
             subprocess.run([
@@ -293,7 +300,7 @@ async def process_dubbing(client, callback_query):
         await client.send_video(
             chat_id=callback_query.message.chat.id,
             video=final_video,
-            caption=f"🎉 **{VOICE_MAP.get(target_lang, {}).get('name', '')} ডাবিং সম্পন্ন হয়েছে!**",
+            caption=f"🎉 **{VOICE_MAP.get(target_lang, {}).get('name', '')} ডাবিং সফলভাবে সম্পন্ন হয়েছে!**",
             supports_streaming=True,
             progress=progress_bar,
             progress_args=(status_msg, "ভিডিও আপলোড হচ্ছে")
@@ -317,5 +324,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 ১০০% অটোমেটিক জেমিনি-মুক্ত ডাবিং বট চালু হয়েছে...")
+print("🚀 ফাইনাল মাল্টি-ল্যাঙ্গুয়েজ ডাবিং বট চালু হয়েছে...")
 app.run()
