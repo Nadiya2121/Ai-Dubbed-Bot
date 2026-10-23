@@ -89,7 +89,7 @@ last_update_time = {}
 TEMP_DIR = tempfile.gettempdir()
 
 # =====================================================================
-# ৩. ডাবিং ইঞ্জিন ফাংশন (Direct Gemini API)
+# ৩. ডাবিং ইঞ্জিন ফাংশন (gemini-flash-latest API)
 # =====================================================================
 def get_media_duration(file_path):
     try:
@@ -123,15 +123,16 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
-# 🧠 সরাসরি Google Direct REST API দিয়ে অডিও বিশ্লেষণ ও অনুবাদ (AQ. কী ১০০% কাজ করবে)
+# 🧠 সরাসরি Google Direct REST API দিয়ে অডিও বিশ্লেষণ ও অনুবাদ
 def analyze_and_translate_audio(audio_path, target_lang):
     target_name = VOICE_MAP.get(target_lang, {}).get("name", "Bengali")
 
-    # অডিও ফাইলটিকে Base64 আকারে রূপান্তর
+    # অডিও ফাইলটিকে Base64 এ কনভার্ট
     with open(audio_path, "rb") as f:
         audio_base64 = base64.b64encode(f.read()).decode("utf-8")
 
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    # আপনার অ্যাকাউন্টের জন্য সঠিক অফিশিয়াল মডেল URL
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
     headers = {
         "Content-Type": "application/json",
         "X-goog-api-key": GEMINI_API_KEY
@@ -176,7 +177,7 @@ def analyze_and_translate_audio(audio_path, target_lang):
     try:
         text = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
     except Exception:
-        raise Exception("Google Gemini থেকে কোনো উত্তর পাওয়া যায়নি!")
+        raise Exception("Google Gemini থেকে কোনো ডায়ালগ অনুবাদ পাওয়া যায়নি!")
 
     if text.startswith("```json"):
         text = text[7:]
@@ -204,7 +205,7 @@ async def generate_multispeaker_audio(dialogues, target_lang, output_file, base_
         seg_file = os.path.join(base_dir, f"seg_{idx}.mp3")
         voice_to_use = lang_info["female"] if "female" in gender else lang_info["male"]
 
-        # Microsoft Neural AI দিয়ে খাঁটি মানুষের মতো ভয়েস তৈরি
+        # Microsoft Neural AI দিয়ে প্রাকৃতিক মানুষের মতো ভয়েস তৈরি
         communicate = edge_tts.Communicate(dialogue_text, voice_to_use)
         await communicate.save(seg_file)
         temp_files.append(seg_file)
@@ -280,7 +281,7 @@ async def process_dubbing(client, callback_query):
     try:
         video_duration = get_media_duration(input_video)
 
-        # ১. অডিও আলাদা করা (কম সাইজের MP3)
+        # ১. অডিও আলাদা করা
         await status_msg.edit_text("⚙️ [▰▱▱▱] ২৫%\n🔹 অডিও আলাদা করা হচ্ছে...")
         subprocess.run([
             FFMPEG_PATH, "-y", "-i", input_video,
