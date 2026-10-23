@@ -31,7 +31,7 @@ def auto_setup():
             needed.append(pkg)
     
     if needed:
-        print("⚙️ প্রয়োজনীয় প্যাকেজগুলো ইনস্টল হচ্ছে...")
+        print("⚙️ প্যাকেজ ইনস্টল হচ্ছে...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade"] + REQUIRED_PACKAGES)
         print("✅ সব প্যাকেজ ইনস্টল সম্পন্ন হয়েছে!\n")
 
@@ -56,7 +56,6 @@ API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-# FFmpeg পারমিশন ঠিক করা
 FFMPEG_PATH = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 try:
     os.chmod(FFMPEG_PATH, os.stat(FFMPEG_PATH).st_mode | stat.S_IEXEC | 0o755)
@@ -65,7 +64,6 @@ except Exception:
 
 app = Client("koyeb_dub_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ভাষা ও প্রাকৃতিক এআই নিউরাল কণ্ঠ
 VOICE_MAP = {
     "bn": {
         "name": "Bengali (বাংলা)",
@@ -89,7 +87,7 @@ last_update_time = {}
 TEMP_DIR = tempfile.gettempdir()
 
 # =====================================================================
-# ৩. ডাবিং ইঞ্জিন ফাংশন (Super Fast & Long Timeout)
+# ৩. ডাবিং ইঞ্জিন ফাংশন (Super Fast Gemini 2.0)
 # =====================================================================
 def get_media_duration(file_path):
     try:
@@ -123,24 +121,25 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
-# 🧠 সরাসরি Google Direct REST API দিয়ে অডিও বিশ্লেষণ ও অনুবাদ
+# 🧠 সুপার ফাস্ট Google Gemini 2.0 / Flash API
 def analyze_and_translate_audio(audio_path, target_lang):
     target_name = VOICE_MAP.get(target_lang, {}).get("name", "Bengali")
 
     with open(audio_path, "rb") as f:
         audio_base64 = base64.b64encode(f.read()).decode("utf-8")
 
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
+    # প্রথমে দ্রুতগতির 2.0 Flash চেষ্টা করবে, না পেলে Flash-latest এ যাবে
+    models = ["gemini-2.0-flash", "gemini-flash-latest"]
     headers = {
         "Content-Type": "application/json",
         "X-goog-api-key": GEMINI_API_KEY
     }
 
     prompt = f"""
-    Listen to this audio.
-    1. Identify all speakers and their gender ('male' or 'female').
-    2. Translate all spoken dialogue into {target_name}.
-    3. Return ONLY a valid JSON list without markdown or explanation:
+    Listen to this audio clip:
+    1. Identify all speakers and classify their gender strictly as 'male' or 'female'.
+    2. Accurately translate their dialogue into {target_name}.
+    3. Return ONLY a valid JSON list without markdown or extra words:
     [
       {{"gender": "male", "text": "dialogue in {target_name}..."}},
       {{"gender": "female", "text": "dialogue in {target_name}..."}}
@@ -165,11 +164,19 @@ def analyze_and_translate_audio(audio_path, target_lang):
         ]
     }
 
-    # টাইমআউট বাড়িয়ে ২৪০ সেকেন্ড (৪ মিনিট) করা হয়েছে
-    response = requests.post(url, headers=headers, json=payload, timeout=240)
-    
-    if response.status_code != 200:
-        raise Exception(f"Google Gemini Error ({response.status_code}): {response.text}")
+    response = None
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=240)
+            if response.status_code == 200:
+                break
+        except Exception:
+            continue
+
+    if not response or response.status_code != 200:
+        err_msg = response.text if response else "গুগলের সাথে কানেক্ট করা যায়নি"
+        raise Exception(f"Google Gemini Error: {err_msg}")
 
     res_json = response.json()
     try:
@@ -278,8 +285,8 @@ async def process_dubbing(client, callback_query):
     try:
         video_duration = get_media_duration(input_video)
 
-        # ১. অডিও আলাদা করা (অতি হালকা 24k ফরম্যাটে)
-        await status_msg.edit_text("⚙️ [▰▱▱▱] ২৫%\n🔹 অডিও প্রসেস করা হচ্ছে...")
+        # ১. অডিও আলাদা করা
+        await status_msg.edit_text("⚙️ [▰▱▱▱] ২৫%\n🔹 ভিডিও থেকে অডিও আলাদা করা হচ্ছে...")
         subprocess.run([
             FFMPEG_PATH, "-y", "-i", input_video,
             "-vn", "-ar", "16000", "-ac", "1", "-b:a", "24k",
@@ -289,15 +296,39 @@ async def process_dubbing(client, callback_query):
         if not os.path.exists(extracted_audio) or os.path.getsize(extracted_audio) == 0:
             raise Exception("ভিডিও থেকে অডিও আলাদা করা সম্ভব হয়নি!")
 
-        # ২. চরিত্র বিশ্লেষণ ও ডায়ালগ অনুবাদ
-        await status_msg.edit_text("⚙️ [▰▰▱▱] ৫০%\n🔹 চরিত্র ও সংলাপ বিশ্লেষণ করা হচ্ছে...")
-        dialogues = analyze_and_translate_audio(extracted_audio, target_lang)
+        # ২. চরিত্র বিশ্লেষণ ও অনুবাদ (লাইভ টাইমার সহ)
+        start_time = time.time()
+        is_translating = True
+
+        async def update_timer():
+            while is_translating:
+                elapsed = int(time.time() - start_time)
+                try:
+                    await status_msg.edit_text(
+                        f"⚙️ [▰▰▱▱] ৫০%\n"
+                        f"🔹 এআই অডিও শুনছে ও সংলাপ অনুবাদ করছে...\n"
+                        f"⏱️ সময় অতিবাহিত: **{elapsed} সেকেন্ড** (দয়া করে অপেক্ষা করুন)"
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(6)
+
+        # টাইমার টাস্ক ব্যাকগ্রাউন্ডে চালু করা
+        timer_task = asyncio.create_task(update_timer())
+
+        # এআই কে দিয়ে অনুবাদ করানো (নন-ব্লকিং ভাবে)
+        loop = asyncio.get_running_loop()
+        dialogues = await loop.run_in_executor(None, analyze_and_translate_audio, extracted_audio, target_lang)
+
+        # অনুবাদ শেষ হলে টাইমার বন্ধ করা
+        is_translating = False
+        timer_task.cancel()
 
         # ৩. চরিত্র অনুযায়ী মানুষের কণ্ঠে নতুন ডাব তৈরি
         await status_msg.edit_text("⚙️ [▰▰▰▱] ৭৫%\n🔹 ছেলে ও মেয়ের কণ্ঠে নতুন ডাব রেন্ডার হচ্ছে...")
         await generate_multispeaker_audio(dialogues, target_lang, dubbed_audio, base_dir)
 
-        # ৪. ভিডিওর সাথে নতুন ভয়েস নিখুঁতভাবে মেলানো
+        # ৪. ভিডিওর সাথে নতুন ভয়েস মেলানো
         await status_msg.edit_text("⚙️ [▰▰▰▰] ৯০%\n🔹 সম্পূর্ণ ডাব করা ভিডিও একত্র করা হচ্ছে...")
         
         if video_duration:
@@ -344,5 +375,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 প্রফেশনাল ডাবিং বট চালু হয়েছে...")
+print("🚀 ডাবিং বট লাইভ টাইমার সহ চালু হয়েছে...")
 app.run()
