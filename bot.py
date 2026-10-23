@@ -69,8 +69,8 @@ VOICE_MAP = {
     "bn": {
         "name": "Bengali (বাংলা)",
         "code": "bn",
-        "male": "bn-BD-PradeepNeural",     # গম্ভীর পুরুষ কণ্ঠ
-        "female": "bn-BD-NabanitaNeural"   # মিষ্টি নারী কণ্ঠ
+        "male": "bn-BD-PradeepNeural",
+        "female": "bn-BD-NabanitaNeural"
     },
     "hi": {
         "name": "Hindi (हिन्दी)",
@@ -91,7 +91,7 @@ last_update_time = {}
 TEMP_DIR = tempfile.gettempdir()
 
 # =====================================================================
-# ৩. মাল্টি-ক্যারেক্টার ডাবিং ইঞ্জিন (ছেলে ও মেয়ের আলাদা সংলাপ)
+# ৩. মাল্টি-ক্যারেক্টার ডাবিং ইঞ্জিন (Auto-Model Fallback)
 # =====================================================================
 async def progress_bar(current, total, message, action_name):
     now = time.time()
@@ -112,31 +112,40 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
-# 🧠 ছেলে ও মেয়ের চরিত্র আলাদা করে সংলাপ অনুবাদ করা
+# 🧠 ছেলে ও মেয়ের সংলাপ আলাদা করে অনুবাদ (কোনো model_not_found এরর ছাড়া)
 def transcribe_and_split_dialogues(audio_path, target_lang):
     if not GROQ_API_KEY:
-        raise Exception("GROQ_API_KEY পাওয়া যায়নি! Koyeb-এ GROQ_API_KEY যোগ করুন।")
+        raise Exception("GROQ_API_KEY পাওয়া যায়নি! Koyeb-এর Environment Variables-এ GROQ_API_KEY যোগ করুন।")
 
     client = Groq(api_key=GROQ_API_KEY)
 
-    # ১. Whisper দিয়ে আসল কথোপকথন নির্ভুলভাবে শোনা
-    with open(audio_path, "rb") as f:
-        transcription = client.audio.transcriptions.create(
-            file=(os.path.basename(audio_path), f.read()),
-            model="whisper-large-v3",
-            response_format="text"
-        )
+    # ১. Whisper দিয়ে আসল কথা শতভাগ নির্ভুলভাবে শোনা
+    whisper_models = ["whisper-large-v3", "whisper-large-v3-turbo"]
+    full_transcript = ""
 
-    full_transcript = str(transcription).strip()
+    for wm in whisper_models:
+        try:
+            with open(audio_path, "rb") as f:
+                transcription = client.audio.transcriptions.create(
+                    file=(os.path.basename(audio_path), f.read()),
+                    model=wm,
+                    response_format="text"
+                )
+            full_transcript = str(transcription).strip()
+            if full_transcript:
+                break
+        except Exception:
+            continue
+
     if not full_transcript or len(full_transcript) < 2:
         raise Exception("ভিডিওতে কোনো মানুষের স্পষ্ট কথা খুঁজে পাওয়া যায়নি!")
 
     target_name = VOICE_MAP.get(target_lang, {}).get("name", "Bengali")
 
-    # ২. LLaMA 3.3 দিয়ে চরিত্র অনুযায়ী সংলাপ ভাগ করা (ছেলে vs মেয়ে)
+    # ২. ইউনিভার্সাল LLaMA মডেল দিয়ে ছেলে ও মেয়ের সংলাপ ভাগ করা
     prompt = f"""
     You are an expert film dubbing director.
-    Analyze the full transcript of this video which may contain multiple characters (male, female, or narrator):
+    Analyze the full transcript of this video which may contain multiple characters (male or female):
     "{full_transcript}"
 
     Instructions:
@@ -146,18 +155,36 @@ def transcribe_and_split_dialogues(audio_path, target_lang):
     4. Return STRICTLY a JSON object with a list named "dialogues":
     {{
       "dialogues": [
-        {{"gender": "male", "text": "সংলাপ..."}},
-        {{"gender": "female", "text": "সংলাপ..."}}
+        {{"gender": "male", "text": "dialogue in {target_name}..."}},
+        {{"gender": "female", "text": "dialogue in {target_name}..."}}
       ]
     }}
     """
 
-    chat_completion = client.chat.completions.create(
-        messages=[{"role": "user", "content": prompt}],
-        model="llama-3.3-70b-versatile",
-        temperature=0.3,
-        response_format={"type": "json_object"}
-    )
+    # Groq-এর সব কটি অফিশিয়াল ইউনিভার্সাল মডেলের লিস্ট
+    available_llms = [
+        "llama-3.1-8b-instant",
+        "llama3-70b-8192",
+        "llama3-8b-8192",
+        "gemma2-9b-it"
+    ]
+
+    chat_completion = None
+    for model_name in available_llms:
+        try:
+            chat_completion = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=model_name,
+                temperature=0.3,
+                response_format={"type": "json_object"}
+            )
+            if chat_completion:
+                break
+        except Exception:
+            continue
+
+    if not chat_completion:
+        raise Exception("Groq-এর কোনো অনুবাদ মডেল রেসপন্স করছে না!")
 
     result_json = json.loads(chat_completion.choices[0].message.content)
     dialogues = result_json.get("dialogues", [])
@@ -167,9 +194,8 @@ def transcribe_and_split_dialogues(audio_path, target_lang):
 
     return dialogues
 
-# 🎙️ ছেলে ও মেয়ের কণ্ঠ তৈরি করা
-async def generate_character_voice(text, lang_code, voice_name, output_file, is_male=False):
-    # চেষ্টা ১: মাইক্রোসফট নিউরাল ভয়েস
+# 🎙️ প্রাকৃতিক স্টুডিও সাউন্ড তৈরি
+async def generate_character_voice(text, lang_code, voice_name, output_file):
     try:
         communicate = edge_tts.Communicate(text, voice_name)
         await communicate.save(output_file)
@@ -178,7 +204,7 @@ async def generate_character_voice(text, lang_code, voice_name, output_file, is_
     except Exception:
         pass
 
-    # চেষ্টা ২: গুগল হাই-কোয়ালিটি স্টুডিও ভয়েস
+    # গুগল স্টুডিও ব্যাকআপ
     raw_mp3 = output_file + "_raw.mp3"
     tts = gTTS(text=text, lang=lang_code, slow=False)
     tts.save(raw_mp3)
@@ -209,16 +235,14 @@ async def render_multicharacter_dubbing(dialogues, target_lang, output_audio, ba
         seg_file = os.path.join(base_dir, f"dialogue_{idx}.mp3")
         is_male = ("male" in gender and "female" not in gender)
         
-        # চরিত্র ছেলে হলে ছেলের কণ্ঠ, মেয়ে হলে মেয়ের কণ্ঠ
         voice_to_use = lang_info["male"] if is_male else lang_info["female"]
 
-        await generate_character_voice(dialogue_text, lang_info["code"], voice_to_use, seg_file, is_male)
+        await generate_character_voice(dialogue_text, lang_info["code"], voice_to_use, seg_file)
         temp_files.append(seg_file)
 
     if not temp_files:
-        raise Exception("কোনো ডায়ালগ অডিও তৈরি হয়নি!")
+        raise Exception("কোনো ডায়ালগ তৈরি করা যায়নি!")
 
-    # সব সংলাপ একসাথে জোড়া লাগানো
     concat_list = os.path.join(base_dir, "concat_list.txt")
     with open(concat_list, "w", encoding="utf-8") as f:
         for t_file in temp_files:
@@ -247,7 +271,7 @@ async def render_multicharacter_dubbing(dialogues, target_lang, output_audio, ba
 # =====================================================================
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 স্বাগতম! ছেলে ও মেয়ে উভয়ের কথোপকথন আছে এমন যেকোনো ভিডিও পাঠান, আমি ছেলে ও মেয়ের আলাদা আলাদা কণ্ঠে সম্পূর্ণ সিনেমা স্টাইলে ডাব করে দেব।")
+    await message.reply_text("👋 স্বাগতম! যেকোনো ১ থেকে ৩ মিনিটের ভিডিও পাঠান, আমি ছেলে ও মেয়ের কণ্ঠে সিনেমা কোয়ালিটিতে বাংলায় ডাব করে দেব।")
 
 @app.on_message(filters.video | filters.document)
 async def handle_video(client, message):
@@ -300,14 +324,14 @@ async def process_dubbing(client, callback_query):
             extracted_audio
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # ২. Whisper ও LLaMA 3.3 দিয়ে ছেলে ও মেয়ের সংলাপ আলাদা করা
-        await status_msg.edit_text("⚙️ [▰▰▰▱] ৬০%\n🔹 Whisper AI ছেলে ও মেয়ের সংলাপ শনাক্ত করছে...")
+        # ২. Whisper দিয়ে নিখুঁত শ্রবণ ও ছেলে-মেয়ে চরিত্র ভাগ করা
+        await status_msg.edit_text("⚙️ [▰▰▰▱] ৬০%\n🔹 Whisper AI ছেলে ও মেয়ের সংলাপ আলাদা করছে...")
         loop = asyncio.get_running_loop()
         dialogues = await loop.run_in_executor(
             None, transcribe_and_split_dialogues, extracted_audio, target_lang
         )
 
-        # ৩. ছেলে ও মেয়ের কণ্ঠে সিনেমা কোয়ালিটি ডাবিং রেন্ডার করা
+        # ৩. চরিত্র অনুযায়ী সিনেমা কোয়ালিটি ডাবিং রেন্ডার করা
         await status_msg.edit_text("⚙️ [▰▰▰▰] ৮০%\n🔹 ছেলে ও মেয়ের আলাদা আলাদা কণ্ঠে ডাবিং তৈরি হচ্ছে...")
         await render_multicharacter_dubbing(dialogues, target_lang, dubbed_audio, base_dir)
 
@@ -329,13 +353,12 @@ async def process_dubbing(client, callback_query):
         if not os.path.exists(final_video) or os.path.getsize(final_video) == 0:
             raise Exception("ভিডিও রেন্ডারিং সম্পন্ন হয়নি!")
 
-        # ৫. ডায়ালগের প্রিভিউ তৈরি
         preview_text = ""
         for d in dialogues[:3]:
             icon = "👨" if "male" in d.get("gender", "") and "female" not in d.get("gender", "") else "👩"
             preview_text += f"{icon} {d.get('text', '')}\n"
 
-        # ৬. টেলিগ্রামে ভিডিও আপলোড
+        # ৫. টেলিগ্রামে ভিডিও আপলোড
         await status_msg.edit_text("🚀 ভিডিও তৈরি সম্পন্ন! টেলিগ্রামে পাঠানো হচ্ছে...")
         await client.send_video(
             chat_id=callback_query.message.chat.id,
@@ -367,5 +390,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 মাল্টি-ক্যারেক্টার ডাবিং বট চালু হয়েছে...")
+print("🚀 ফাইনাল ক্র্যাশ-ফ্রি ডাবিং বট চালু হয়েছে...")
 app.run()
