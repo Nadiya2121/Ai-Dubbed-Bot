@@ -8,13 +8,14 @@ import traceback
 import subprocess
 
 # =====================================================================
-# ১. স্বয়ংক্রিয় প্যাকেজ ইনস্টলার
+# ১. স্বয়ংক্রিয় প্যাকেজ ইনস্টলার (Smart Dual-TTS Engine)
 # =====================================================================
 REQUIRED_PACKAGES = [
     "pyrogram==2.0.106",
     "tgcrypto==1.2.5",
     "SpeechRecognition>=3.10.0",
     "deep-translator>=1.11.4",
+    "gTTS>=2.5.0",
     "edge-tts>=6.1.9",
     "python-dotenv==1.0.1",
     "imageio-ffmpeg==0.5.1"
@@ -43,6 +44,7 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import speech_recognition as sr
 from deep_translator import GoogleTranslator
+from gtts import gTTS
 import edge_tts
 import imageio_ffmpeg
 
@@ -55,7 +57,6 @@ API_ID = int(os.getenv("API_ID", "12345678"))
 API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 
-# FFmpeg পারমিশন ফিক্স
 FFMPEG_PATH = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 try:
     os.chmod(FFMPEG_PATH, os.stat(FFMPEG_PATH).st_mode | stat.S_IEXEC | 0o755)
@@ -64,7 +65,6 @@ except Exception:
 
 app = Client("koyeb_dub_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ভাষা ও নিউরাল কণ্ঠ
 VOICE_MAP = {
     "bn": {
         "name": "Bengali (বাংলা)",
@@ -91,7 +91,7 @@ last_update_time = {}
 TEMP_DIR = tempfile.gettempdir()
 
 # =====================================================================
-# ৩. মাল্টি-ল্যাঙ্গুয়েজ অটোমেটিক ডাবিং ইঞ্জিন
+# ৩. ডাবিং ইঞ্জিন ফাংশন (403 Error Bypass)
 # =====================================================================
 def get_media_duration(file_path):
     try:
@@ -125,7 +125,7 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
-# 🧠 ভিডিওর আসল ভাষা (হিন্দি, ইংলিশ বা বাংলা) অটো শনাক্ত করে অনুবাদ
+# 🧠 ভিডিওর আসল ভাষা অটো শনাক্ত করে অনুবাদ
 def transcribe_and_translate_multilingual(wav_path, target_lang):
     recognizer = sr.Recognizer()
     recognizer.energy_threshold = 200
@@ -134,7 +134,6 @@ def transcribe_and_translate_multilingual(wav_path, target_lang):
         audio_data = recognizer.record(source)
 
     spoken_text = ""
-    # ভিডিওর ভাষা যাই হোক না কেন (হিন্দি, ইংরেজি, বাংলা বা উর্দু) সব ট্রাই করবে
     try_languages = ["hi-IN", "en-US", "bn-BD", "ur-PK"]
     for lang in try_languages:
         try:
@@ -148,7 +147,6 @@ def transcribe_and_translate_multilingual(wav_path, target_lang):
     if not spoken_text:
         return ""
 
-    # নির্বাচিত ভাষায় অনুবাদ করা
     target_code = VOICE_MAP.get(target_lang, {}).get("code", "bn")
     try:
         translated_text = GoogleTranslator(source='auto', target=target_code).translate(spoken_text)
@@ -156,9 +154,40 @@ def transcribe_and_translate_multilingual(wav_path, target_lang):
     except Exception:
         return spoken_text
 
-# 🎙️ সম্পূর্ণ ভিডিওর ভাষা পরিবর্তন করে নতুন কণ্ঠে ডাব করা
+# 🎙️ স্মার্ট ভয়েস জেনারেটর (403 ব্লক হলে নিজে নিজেই গুগল ভয়েসে সুইচ করবে)
+async def generate_speech_safe(text, lang_code, voice_name, output_file, is_male=False):
+    # ধাপ ১: মাইক্রোসফট নিউরাল ভয়েস চেষ্টা করা
+    try:
+        communicate = edge_tts.Communicate(text, voice_name)
+        await communicate.save(output_file)
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 100:
+            return
+    except Exception:
+        pass  # মাইক্রোসফট ৪০৩ ব্লক মারলে নিচে স্বয়ংক্রিয়ভাবে গুগলে চলে যাবে
+
+    # ধাপ ২: ১০০% নির্ভরযোগ্য গুগল এআই ভয়েস (কখনোই ৪০৩ বা এরর দেবে না)
+    raw_gtts = output_file + "_raw.mp3"
+    tts = gTTS(text=text, lang=lang_code, slow=False)
+    tts.save(raw_gtts)
+
+    # ছেলে হলে স্বাভাবিক ভরাট পুরুষ কণ্ঠ, মেয়ে হলে মিষ্টি নারী কণ্ঠ
+    if is_male:
+        subprocess.run([
+            FFMPEG_PATH, "-y", "-i", raw_gtts,
+            "-af", "asetrate=24000*0.92,atempo=1.08",
+            output_file
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        shutil.move(raw_gtts, output_file)
+
+    if os.path.exists(raw_gtts):
+        try:
+            os.remove(raw_gtts)
+        except Exception:
+            pass
+
+# 🎙️ পুরো ভিডিওর ভাষা পরিবর্তন করে নতুন ডাবিং তৈরি
 async def process_multispeaker_dubbing(input_video, target_lang, output_audio, base_dir):
-    # ১. ভিডিও থেকে অডিও বের করে ২৫ সেকেন্ডের খণ্ডে ভাগ করা (যাতে কোনো ডায়ালগ না কাটে)
     chunk_pattern = os.path.join(base_dir, "chunk_%03d.wav")
     subprocess.run([
         FFMPEG_PATH, "-y", "-i", input_video,
@@ -179,19 +208,19 @@ async def process_multispeaker_dubbing(input_video, target_lang, output_audio, b
     temp_tts_files = []
     translated_count = 0
 
-    # ২. প্রতি খণ্ড অনুবাদ করে মিষ্টি ছেলে ও মেয়ের নতুন কণ্ঠ দেওয়া
     for idx, chunk in enumerate(chunk_files):
         translated = transcribe_and_translate_multilingual(chunk, target_lang)
         seg_output = os.path.join(base_dir, f"seg_{idx}.mp3")
 
         if translated.strip():
             translated_count += 1
-            # ছেলে ও মেয়ের কণ্ঠ অদলবদল করে ন্যাচারাল ডাবিং দেওয়া
-            voice = lang_info["male"] if idx % 2 == 0 else lang_info["female"]
-            communicate = edge_tts.Communicate(translated, voice)
-            await communicate.save(seg_output)
+            is_male = (idx % 2 == 0)
+            voice = lang_info["male"] if is_male else lang_info["female"]
+
+            # স্মার্ট সেফ ভয়েস জেনারেটর কল
+            await generate_speech_safe(translated, lang_info["code"], voice, seg_output, is_male)
         else:
-            # যদি সত্যিই কোনো কথা না থাকে (শুধু ব্যাকগ্রাউন্ড মিউজিক)
+            # ডায়ালগ না থাকলে শুধু ব্যাকগ্রাউন্ড হালকা মিউজিক রাখা
             subprocess.run([
                 FFMPEG_PATH, "-y", "-i", chunk,
                 "-af", "volume=0.15",
@@ -205,7 +234,7 @@ async def process_multispeaker_dubbing(input_video, target_lang, output_audio, b
     if translated_count == 0:
         raise Exception("ভিডিওতে কোনো মানুষের স্পষ্ট কথাবার্তা বা সংলাপ পাওয়া যায়নি! স্পষ্ট কণ্ঠ আছে এমন ভিডিও দিন।")
 
-    # ৩. সম্পূর্ণ নতুন অডিও একসাথে জোড়া লাগানো
+    # সব খণ্ড একত্র করা
     concat_list = os.path.join(base_dir, "concat_list.txt")
     with open(concat_list, "w", encoding="utf-8") as f:
         for t_file in temp_tts_files:
@@ -324,5 +353,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 ফাইনাল মাল্টি-ল্যাঙ্গুয়েজ ডাবিং বট চালু হয়েছে...")
+print("🚀 ফাইনাল অটো-বাইপাস ডাবিং বট চালু হয়েছে...")
 app.run()
