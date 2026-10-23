@@ -2,7 +2,6 @@ import sys
 import os
 import time
 import json
-import base64
 import shutil
 import stat
 import tempfile
@@ -87,7 +86,7 @@ last_update_time = {}
 TEMP_DIR = tempfile.gettempdir()
 
 # =====================================================================
-# ৩. ডাবিং ইঞ্জিন ফাংশন (Super Fast Gemini 2.0)
+# ৩. ডাবিং ইঞ্জিন ফাংশন (Lightning Fast Google File API)
 # =====================================================================
 def get_media_duration(file_path):
     try:
@@ -121,25 +120,38 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
-# 🧠 সুপার ফাস্ট Google Gemini 2.0 / Flash API
+# 🧠 সুপার ফাস্ট Google File API দিয়ে অডিও প্রসেসিং (মাত্র ১০-১৫ সেকেন্ড সময় লাগবে)
 def analyze_and_translate_audio(audio_path, target_lang):
     target_name = VOICE_MAP.get(target_lang, {}).get("name", "Bengali")
 
-    with open(audio_path, "rb") as f:
-        audio_base64 = base64.b64encode(f.read()).decode("utf-8")
-
-    # প্রথমে দ্রুতগতির 2.0 Flash চেষ্টা করবে, না পেলে Flash-latest এ যাবে
-    models = ["gemini-2.0-flash", "gemini-flash-latest"]
-    headers = {
-        "Content-Type": "application/json",
-        "X-goog-api-key": GEMINI_API_KEY
+    # ধাপ ১: ১ সেকেন্ডে অডিও সরাসরি গুগলে আপলোড করা
+    file_size = os.path.getsize(audio_path)
+    upload_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}"
+    upload_headers = {
+        "X-Goog-Upload-Command": "start, upload, finalize",
+        "X-Goog-Upload-Header-Content-Length": str(file_size),
+        "X-Goog-Upload-Header-Content-Type": "audio/mp3",
+        "Content-Type": "audio/mp3"
     }
 
+    with open(audio_path, "rb") as f:
+        up_res = requests.post(upload_url, headers=upload_headers, data=f, timeout=60)
+
+    if up_res.status_code != 200:
+        raise Exception(f"Google File Upload Error ({up_res.status_code}): {up_res.text}")
+
+    file_info = up_res.json()
+    file_uri = file_info["file"]["uri"]
+
+    # ধাপ ২: আপলোড করা ফাইল সরাসরি জেমিনিকে দিয়ে দ্রুত বিশ্লেষণ করানো
+    gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
+    gen_headers = {"Content-Type": "application/json"}
+
     prompt = f"""
-    Listen to this audio clip:
-    1. Identify all speakers and classify their gender strictly as 'male' or 'female'.
-    2. Accurately translate their dialogue into {target_name}.
-    3. Return ONLY a valid JSON list without markdown or extra words:
+    Listen to this audio dialogue:
+    1. Identify all speakers and determine their gender ('male' or 'female').
+    2. Translate dialogue strictly into {target_name}. Keep it natural.
+    3. Return ONLY a valid JSON list without any extra markdown formatting:
     [
       {{"gender": "male", "text": "dialogue in {target_name}..."}},
       {{"gender": "female", "text": "dialogue in {target_name}..."}}
@@ -151,9 +163,9 @@ def analyze_and_translate_audio(audio_path, target_lang):
             {
                 "parts": [
                     {
-                        "inline_data": {
+                        "file_data": {
                             "mime_type": "audio/mp3",
-                            "data": audio_base64
+                            "file_uri": file_uri
                         }
                     },
                     {
@@ -164,19 +176,10 @@ def analyze_and_translate_audio(audio_path, target_lang):
         ]
     }
 
-    response = None
-    for model_name in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=240)
-            if response.status_code == 200:
-                break
-        except Exception:
-            continue
+    response = requests.post(gen_url, headers=gen_headers, json=payload, timeout=60)
 
-    if not response or response.status_code != 200:
-        err_msg = response.text if response else "গুগলের সাথে কানেক্ট করা যায়নি"
-        raise Exception(f"Google Gemini Error: {err_msg}")
+    if response.status_code != 200:
+        raise Exception(f"Google Gemini Error ({response.status_code}): {response.text}")
 
     res_json = response.json()
     try:
@@ -286,17 +289,17 @@ async def process_dubbing(client, callback_query):
         video_duration = get_media_duration(input_video)
 
         # ১. অডিও আলাদা করা
-        await status_msg.edit_text("⚙️ [▰▱▱▱] ২৫%\n🔹 ভিডিও থেকে অডিও আলাদা করা হচ্ছে...")
+        await status_msg.edit_text("⚙️ [▰▱▱▱] ২৫%\n🔹 অডিও আলাদা করা হচ্ছে...")
         subprocess.run([
             FFMPEG_PATH, "-y", "-i", input_video,
-            "-vn", "-ar", "16000", "-ac", "1", "-b:a", "24k",
+            "-vn", "-ar", "16000", "-ac", "1", "-b:a", "48k",
             extracted_audio
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if not os.path.exists(extracted_audio) or os.path.getsize(extracted_audio) == 0:
             raise Exception("ভিডিও থেকে অডিও আলাদা করা সম্ভব হয়নি!")
 
-        # ২. চরিত্র বিশ্লেষণ ও অনুবাদ (লাইভ টাইমার সহ)
+        # ২. সুপার ফাস্ট বিশ্লেষণ ও অনুবাদ (টাইমার সহ)
         start_time = time.time()
         is_translating = True
 
@@ -307,20 +310,17 @@ async def process_dubbing(client, callback_query):
                     await status_msg.edit_text(
                         f"⚙️ [▰▰▱▱] ৫০%\n"
                         f"🔹 এআই অডিও শুনছে ও সংলাপ অনুবাদ করছে...\n"
-                        f"⏱️ সময় অতিবাহিত: **{elapsed} সেকেন্ড** (দয়া করে অপেক্ষা করুন)"
+                        f"⏱️ সময় অতিবাহিত: **{elapsed} সেকেন্ড**"
                     )
                 except Exception:
                     pass
-                await asyncio.sleep(6)
+                await asyncio.sleep(5)
 
-        # টাইমার টাস্ক ব্যাকগ্রাউন্ডে চালু করা
         timer_task = asyncio.create_task(update_timer())
 
-        # এআই কে দিয়ে অনুবাদ করানো (নন-ব্লকিং ভাবে)
         loop = asyncio.get_running_loop()
         dialogues = await loop.run_in_executor(None, analyze_and_translate_audio, extracted_audio, target_lang)
 
-        # অনুবাদ শেষ হলে টাইমার বন্ধ করা
         is_translating = False
         timer_task.cancel()
 
@@ -375,5 +375,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 ডাবিং বট লাইভ টাইমার সহ চালু হয়েছে...")
+print("🚀 সুপার ফাস্ট ডাবিং বট চালু হয়েছে...")
 app.run()
