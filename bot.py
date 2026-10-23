@@ -3,11 +3,13 @@ import os
 import time
 import json
 import shutil
-import asyncio
+import stat
+import tempfile
+import traceback
 import subprocess
 
 # =====================================================================
-# ১. প্রয়োজনীয় প্যাকেজ ইনস্টল
+# ১. স্বয়ংক্রিয় প্যাকেজ ইনস্টলার (Koyeb ও লোকাল সার্ভারের জন্য)
 # =====================================================================
 REQUIRED_PACKAGES = [
     "pyrogram==2.0.106",
@@ -19,19 +21,23 @@ REQUIRED_PACKAGES = [
 ]
 
 def auto_setup():
-    try:
-        import pyrogram
-        import google.generativeai
-        import edge_tts
-        import imageio_ffmpeg
-    except ImportError:
-        print("⚙️ প্রয়োজনীয় প্যাকেজ ইনস্টল হচ্ছে...")
+    needed = []
+    for pkg in REQUIRED_PACKAGES:
+        pkg_name = pkg.split("==")[0].split(">=")[0].replace("-", "_")
+        try:
+            __import__(pkg_name)
+        except ImportError:
+            needed.append(pkg)
+    
+    if needed:
+        print("⚙️ প্রয়োজনীয় প্যাকেজগুলো ইনস্টল হচ্ছে, অপেক্ষা করুন...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade"] + REQUIRED_PACKAGES)
-        print("✅ ইনস্টল সম্পন্ন!\n")
+        print("✅ সব প্যাকেজ ইনস্টল সম্পন্ন হয়েছে!\n")
 
 auto_setup()
 
 # লাইব্রেরি লোড
+import asyncio
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -40,25 +46,33 @@ import edge_tts
 import imageio_ffmpeg
 
 # =====================================================================
-# ২. কনফিগারেশন
+# ২. কনফিগারেশন ও পারমিশন ফিক্স
 # =====================================================================
 load_dotenv()
 
 API_ID = int(os.getenv("API_ID", "12345678"))
 API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-genai.configure(api_key=GEMINI_API_KEY)
+# Google Gemini কনফিগার
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+# FFmpeg পারমিশন ঠিক করা (Koyeb লিনাক্স সার্ভার ফিক্স)
 FFMPEG_PATH = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
+try:
+    os.chmod(FFMPEG_PATH, os.stat(FFMPEG_PATH).st_mode | stat.S_IEXEC | 0o755)
+except Exception:
+    pass
 
 app = Client("koyeb_dub_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ভাষা ও নিখুঁত মানুষের নিউরাল ভয়েস ম্যাপিং (সম্পূর্ণ ফ্রি)
+# ভাষা ও প্রাকৃতিক এআই নিউরাল কণ্ঠ
 VOICE_MAP = {
     "bn": {
         "name": "Bengali (বাংলা)",
-        "male": "bn-BD-PradeepNeural",     # চমৎকার পুরুষালী কণ্ঠ
+        "male": "bn-BD-PradeepNeural",     # প্রাকৃতিক বাংলাদেশি পুরুষ কণ্ঠ
         "female": "bn-BD-NabanitaNeural"   # মিষ্টি নারী কণ্ঠ
     },
     "hi": {
@@ -75,9 +89,10 @@ VOICE_MAP = {
 
 user_data = {}
 last_update_time = {}
+TEMP_DIR = tempfile.gettempdir()  # Koyeb-এর পারমিশন যুক্ত নিরাপদ ফোল্ডার (/tmp)
 
 # =====================================================================
-# ৩. ডাবিং ইঞ্জিন ফাংশন
+# ৩. হেল্পার ও ডাবিং ইঞ্জিন ফাংশন
 # =====================================================================
 def get_media_duration(file_path):
     try:
@@ -111,7 +126,7 @@ async def progress_bar(current, total, message, action_name):
     except Exception:
         pass
 
-# 🧠 এআই দিয়ে ক্যারেক্টার ও ডায়ালগ অনুবাদ
+# 🧠 Gemini দিয়ে ক্যারেক্টার ও ডায়ালগ অনুবাদ
 def analyze_and_translate_audio(audio_path, target_lang):
     target_name = VOICE_MAP.get(target_lang, {}).get("name", "Bengali")
     
@@ -120,14 +135,14 @@ def analyze_and_translate_audio(audio_path, target_lang):
 
     prompt = f"""
     You are a professional film dubbing director. 
-    Analyze the speech in this audio clip:
-    1. Identify all speakers and classify each dialogue as 'male' or 'female'.
-    2. Accurately translate their dialogues into {target_name}. 
-    3. Make sure the translated lines sound completely natural for human speech.
-    4. Return strictly a JSON array without markdown formatting:
+    Carefully listen to the voices in this audio:
+    1. Identify all speakers and determine their gender ('male' or 'female').
+    2. Accurately translate their dialogue strictly into {target_name}.
+    3. Keep the dialogues natural for human conversation.
+    4. Return ONLY a valid JSON list without any extra markdown formatting:
     [
-      {{"gender": "male", "text": "অনূদিত ডায়ালগ..."}},
-      {{"gender": "female", "text": "অনূদিত ডায়ালগ..."}}
+      {{"gender": "male", "text": "dialogue in {target_name}..."}},
+      {{"gender": "female", "text": "dialogue in {target_name}..."}}
     ]
     """
 
@@ -146,7 +161,7 @@ def analyze_and_translate_audio(audio_path, target_lang):
     except Exception:
         return [{"gender": "male", "text": text.replace('"', '').strip()}]
 
-# 🎙️ একাধিক চরিত্রের জন্য হাই-কোয়ালিটি ভয়েস তৈরি
+# 🎙️ একাধিক চরিত্রের জন্য জীবন্ত নিউরাল কণ্ঠ তৈরি
 async def generate_multispeaker_audio(dialogues, target_lang, output_file, base_dir):
     temp_files = []
     lang_info = VOICE_MAP.get(target_lang, VOICE_MAP["bn"])
@@ -160,15 +175,15 @@ async def generate_multispeaker_audio(dialogues, target_lang, output_file, base_
         seg_file = os.path.join(base_dir, f"seg_{idx}.mp3")
         voice_to_use = lang_info["female"] if "female" in gender else lang_info["male"]
 
-        # ন্যাচারাল নিউরাল ভয়েসে ডাব তৈরি
+        # Microsoft Neural AI দিয়ে খাঁটি মানুষের ভয়েস জেনারেট
         communicate = edge_tts.Communicate(dialogue_text, voice_to_use)
         await communicate.save(seg_file)
         temp_files.append(seg_file)
 
     if not temp_files:
-        raise Exception("কোনো ডাবিং অডিও তৈরি হয়নি!")
+        raise Exception("কোনো ডাবিং অডিও তৈরি করা যায়নি!")
 
-    # অডিও ট্র্যাকগুলো জোড়া লাগানো
+    # অডিও ফাইলগুলো একসাথে জোড়া লাগানো
     concat_list = os.path.join(base_dir, "concat_list.txt")
     with open(concat_list, "w", encoding="utf-8") as f:
         for t_file in temp_files:
@@ -179,6 +194,7 @@ async def generate_multispeaker_audio(dialogues, target_lang, output_file, base_
         "-i", concat_list, "-c", "copy", output_file
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    # অতিরিক্ত পার্ট মুছে ফেলা
     for t_file in temp_files:
         if os.path.exists(t_file):
             os.remove(t_file)
@@ -190,7 +206,7 @@ async def generate_multispeaker_audio(dialogues, target_lang, output_file, base_
 # =====================================================================
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 স্বাগতম! ১ থেকে ৩ মিনিটের যেকোনো ভিডিও পাঠান, আমি ছেলে ও মেয়ের কণ্ঠ আলাদা করে সম্পূর্ণ ডাব করে দেব।")
+    await message.reply_text("👋 স্বাগতম! যেকোনো ১ থেকে ৩ মিনিটের ভিডিও পাঠান, আমি ছেলে ও মেয়ের কণ্ঠ আলাদা করে সম্পূর্ণ ডাব করে দেব।")
 
 @app.on_message(filters.video | filters.document)
 async def handle_video(client, message):
@@ -200,7 +216,7 @@ async def handle_video(client, message):
 
     msg = await message.reply_text("⏳ ভিডিও ডাউনলোড হচ্ছে...")
     user_id = str(message.from_user.id)
-    target_path = os.path.abspath(f"{user_id}_input.mp4")
+    target_path = os.path.join(TEMP_DIR, f"{user_id}_input.mp4")
 
     downloaded_path = await client.download_media(
         message, 
@@ -215,7 +231,7 @@ async def handle_video(client, message):
          InlineKeyboardButton("🇮🇳 হিন্দি", callback_data="hi"),
          InlineKeyboardButton("🇺🇸 ইংরেজি", callback_data="en")]
     ])
-    await msg.edit_text("✅ ডাউনলোড সম্পূর্ণ!\nকোন ভাষায় ডাব করতে চান সিলেক্ট করুন:", reply_markup=markup)
+    await msg.edit_text("✅ ডাউনলোড সম্পন্ন!\nকোন ভাষায় ডাব করতে চান সিলেক্ট করুন:", reply_markup=markup)
 
 @app.on_callback_query()
 async def process_dubbing(client, callback_query):
@@ -227,9 +243,9 @@ async def process_dubbing(client, callback_query):
         return
 
     input_video = user_data[user_id]
-    base_dir = os.path.dirname(input_video)
+    base_dir = TEMP_DIR
     extracted_audio = os.path.join(base_dir, f"{user_id}_extracted.mp3")
-    dubbed_audio = os.path.join(base_dir, f"{user_id}_dubbed_audio.mp3")
+    dubbed_audio = os.path.join(base_dir, f"{user_id}_dubbed.mp3")
     final_video = os.path.join(base_dir, f"{user_id}_final_dubbed.mp4")
 
     status_msg = await callback_query.message.edit_text("⚙️ **ডাবিং প্রক্রিয়া শুরু হচ্ছে...**")
@@ -239,24 +255,26 @@ async def process_dubbing(client, callback_query):
 
         # ১. ভিডিও থেকে অডিও নিষ্কাশন
         await status_msg.edit_text("⚙️ [▰▱▱▱] ২৫%\n🔹 অডিও আলাদা করা হচ্ছে...")
-        subprocess.run([
+        res = subprocess.run([
             FFMPEG_PATH, "-y", "-i", input_video,
             "-vn", "-ar", "16000", "-ac", "1", "-b:a", "64k",
             extracted_audio
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        if not os.path.exists(extracted_audio) or os.path.getsize(extracted_audio) == 0:
+            raise Exception("ভিডিও থেকে অডিও আলাদা করা সম্ভব হয়নি! ভিডিও ফাইলটি সঠিক কি না নিশ্চিত করুন।")
 
-        # ২. চরিত্র বিশ্লেষণ ও ডায়ালগ রূপান্তর
+        # ২. চরিত্র বিশ্লেষণ ও ডায়ালগ অনুবাদ
         await status_msg.edit_text("⚙️ [▰▰▱▱] ৫০%\n🔹 চরিত্র ও সংলাপ বিশ্লেষণ করা হচ্ছে...")
         dialogues = analyze_and_translate_audio(extracted_audio, target_lang)
 
-        # ৩. চরিত্র অনুযায়ী মানুষের কণ্ঠে ডাবিং তৈরি
+        # ৩. চরিত্র অনুযায়ী মানুষের কণ্ঠে নতুন ডাব তৈরি
         await status_msg.edit_text("⚙️ [▰▰▰▱] ৭৫%\n🔹 ছেলে ও মেয়ের কণ্ঠে নতুন ডাব রেন্ডার হচ্ছে...")
         await generate_multispeaker_audio(dialogues, target_lang, dubbed_audio, base_dir)
 
-        # ৪. অরিজিনাল ভিডিওর সাথে নতুন ভয়েস নিখুঁতভাবে টাইমিং ম্যাচ করে জোড়া লাগানো
+        # ৪. অরিজিনাল ভিডিওর সাথে নতুন ভয়েস নিখুঁতভাবে সিঙ্ক করে জোড়া লাগানো
         await status_msg.edit_text("⚙️ [▰▰▰▰] ৯০%\n🔹 সম্পূর্ণ ডাব করা ভিডিও একত্র করা হচ্ছে...")
         
-        # টাইমিং ফিট করা (ভিডিওর সমান অডিও বানানো)
         if video_duration:
             subprocess.run([
                 FFMPEG_PATH, "-y", "-i", input_video, "-i", dubbed_audio,
@@ -272,7 +290,7 @@ async def process_dubbing(client, callback_query):
                 final_video
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # ৫. টেলিগ্রামে ভিডিও পাঠানো
+        # ৫. টেলিগ্রামে ভিডিও আপলোড
         await status_msg.edit_text("🚀 ভিডিও তৈরি সম্পন্ন! টেলিগ্রামে পাঠানো হচ্ছে...")
         await client.send_video(
             chat_id=callback_query.message.chat.id,
@@ -284,10 +302,11 @@ async def process_dubbing(client, callback_query):
         )
 
     except Exception as e:
-        await callback_query.message.reply_text(f"❌ এরর: {str(e)}")
+        print(f"ERROR OCCURRED:\n{traceback.format_exc()}")
+        await callback_query.message.reply_text(f"❌ এরর হয়েছে:\n`{str(e)}`")
 
     finally:
-        # ফাইল পরিষ্কার করা যাতে Koyeb সার্ভার জ্যাম না হয়
+        # মেমোরি ক্লিয়ার রাখা (Koyeb সার্ভার ক্লিন রাখার জন্য)
         for path in [input_video, extracted_audio, dubbed_audio, final_video]:
             if os.path.exists(path):
                 try:
@@ -301,5 +320,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 ডাবিং বট চালু হয়েছে...")
+print("🚀 প্রফেশনাল মাল্টি-ভয়েস ডাবিং বট চালু হয়েছে...")
 app.run()
