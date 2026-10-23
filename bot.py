@@ -56,7 +56,7 @@ API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-# FFmpeg পারমিশন ঠিক করা (Koyeb লিনাক্স ফিক্স)
+# FFmpeg পারমিশন ঠিক করা
 FFMPEG_PATH = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 try:
     os.chmod(FFMPEG_PATH, os.stat(FFMPEG_PATH).st_mode | stat.S_IEXEC | 0o755)
@@ -89,7 +89,7 @@ last_update_time = {}
 TEMP_DIR = tempfile.gettempdir()
 
 # =====================================================================
-# ৩. ডাবিং ইঞ্জিন ফাংশন (gemini-flash-latest API)
+# ৩. ডাবিং ইঞ্জিন ফাংশন (Super Fast & Long Timeout)
 # =====================================================================
 def get_media_duration(file_path):
     try:
@@ -127,11 +127,9 @@ async def progress_bar(current, total, message, action_name):
 def analyze_and_translate_audio(audio_path, target_lang):
     target_name = VOICE_MAP.get(target_lang, {}).get("name", "Bengali")
 
-    # অডিও ফাইলটিকে Base64 এ কনভার্ট
     with open(audio_path, "rb") as f:
         audio_base64 = base64.b64encode(f.read()).decode("utf-8")
 
-    # আপনার অ্যাকাউন্টের জন্য সঠিক অফিশিয়াল মডেল URL
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
     headers = {
         "Content-Type": "application/json",
@@ -139,14 +137,13 @@ def analyze_and_translate_audio(audio_path, target_lang):
     }
 
     prompt = f"""
-    You are an expert film dubbing director. 
-    Listen to the audio dialogue:
-    1. Identify each speaker and categorize their gender as 'male' or 'female'.
-    2. Translate the dialogue strictly into {target_name}. 
-    3. Return ONLY a valid JSON list without any extra markdown:
+    Listen to this audio.
+    1. Identify all speakers and their gender ('male' or 'female').
+    2. Translate all spoken dialogue into {target_name}.
+    3. Return ONLY a valid JSON list without markdown or explanation:
     [
-      {{"gender": "male", "text": "dialogue..."}},
-      {{"gender": "female", "text": "dialogue..."}}
+      {{"gender": "male", "text": "dialogue in {target_name}..."}},
+      {{"gender": "female", "text": "dialogue in {target_name}..."}}
     ]
     """
 
@@ -168,7 +165,8 @@ def analyze_and_translate_audio(audio_path, target_lang):
         ]
     }
 
-    response = requests.post(url, headers=headers, json=payload, timeout=90)
+    # টাইমআউট বাড়িয়ে ২৪০ সেকেন্ড (৪ মিনিট) করা হয়েছে
+    response = requests.post(url, headers=headers, json=payload, timeout=240)
     
     if response.status_code != 200:
         raise Exception(f"Google Gemini Error ({response.status_code}): {response.text}")
@@ -177,7 +175,7 @@ def analyze_and_translate_audio(audio_path, target_lang):
     try:
         text = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
     except Exception:
-        raise Exception("Google Gemini থেকে কোনো ডায়ালগ অনুবাদ পাওয়া যায়নি!")
+        raise Exception("Google Gemini থেকে কোনো উত্তর পাওয়া যায়নি!")
 
     if text.startswith("```json"):
         text = text[7:]
@@ -205,7 +203,6 @@ async def generate_multispeaker_audio(dialogues, target_lang, output_file, base_
         seg_file = os.path.join(base_dir, f"seg_{idx}.mp3")
         voice_to_use = lang_info["female"] if "female" in gender else lang_info["male"]
 
-        # Microsoft Neural AI দিয়ে প্রাকৃতিক মানুষের মতো ভয়েস তৈরি
         communicate = edge_tts.Communicate(dialogue_text, voice_to_use)
         await communicate.save(seg_file)
         temp_files.append(seg_file)
@@ -281,11 +278,11 @@ async def process_dubbing(client, callback_query):
     try:
         video_duration = get_media_duration(input_video)
 
-        # ১. অডিও আলাদা করা
-        await status_msg.edit_text("⚙️ [▰▱▱▱] ২৫%\n🔹 অডিও আলাদা করা হচ্ছে...")
+        # ১. অডিও আলাদা করা (অতি হালকা 24k ফরম্যাটে)
+        await status_msg.edit_text("⚙️ [▰▱▱▱] ২৫%\n🔹 অডিও প্রসেস করা হচ্ছে...")
         subprocess.run([
             FFMPEG_PATH, "-y", "-i", input_video,
-            "-vn", "-ar", "16000", "-ac", "1", "-b:a", "32k",
+            "-vn", "-ar", "16000", "-ac", "1", "-b:a", "24k",
             extracted_audio
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
