@@ -3,16 +3,17 @@ import os
 import time
 import json
 import shutil
+import asyncio
 import subprocess
 
 # =====================================================================
-# ১. স্বয়ংক্রিয় প্যাকেজ ইনস্টলার (Google AI Studio সহ)
+# ১. প্রয়োজনীয় প্যাকেজ ইনস্টল
 # =====================================================================
 REQUIRED_PACKAGES = [
     "pyrogram==2.0.106",
     "tgcrypto==1.2.5",
     "google-generativeai>=0.8.0",
-    "gtts>=2.5.0",
+    "edge-tts>=6.1.9",
     "python-dotenv==1.0.1",
     "imageio-ffmpeg==0.5.1"
 ]
@@ -21,22 +22,21 @@ def auto_setup():
     try:
         import pyrogram
         import google.generativeai
-        import gtts
+        import edge_tts
         import imageio_ffmpeg
     except ImportError:
-        print("⚙️ Google AI Studio প্যাকেজগুলো ইনস্টল হচ্ছে, অপেক্ষা করুন...")
+        print("⚙️ প্রয়োজনীয় প্যাকেজ ইনস্টল হচ্ছে...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade"] + REQUIRED_PACKAGES)
-        print("✅ সব প্যাকেজ ইনস্টল সম্পন্ন হয়েছে!\n")
+        print("✅ ইনস্টল সম্পন্ন!\n")
 
 auto_setup()
 
 # লাইব্রেরি লোড
-import asyncio
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import google.generativeai as genai
-from gtts import gTTS
+import edge_tts
 import imageio_ffmpeg
 
 # =====================================================================
@@ -47,28 +47,39 @@ load_dotenv()
 API_ID = int(os.getenv("API_ID", "12345678"))
 API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_KEY")  # aistudio.google.com এর কী
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_KEY")
 
-# Google Gemini কনফিগার
 genai.configure(api_key=GEMINI_API_KEY)
-
 FFMPEG_PATH = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 
-app = Client("gemini_dub_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("koyeb_dub_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-LANG_NAMES = {
-    "bn": "Bengali (বাংলা)",
-    "hi": "Hindi (हिन्दी)",
-    "en": "English"
+# ভাষা ও নিখুঁত মানুষের নিউরাল ভয়েস ম্যাপিং (সম্পূর্ণ ফ্রি)
+VOICE_MAP = {
+    "bn": {
+        "name": "Bengali (বাংলা)",
+        "male": "bn-BD-PradeepNeural",     # চমৎকার পুরুষালী কণ্ঠ
+        "female": "bn-BD-NabanitaNeural"   # মিষ্টি নারী কণ্ঠ
+    },
+    "hi": {
+        "name": "Hindi (हिन्दी)",
+        "male": "hi-IN-MadhurNeural",
+        "female": "hi-IN-SwaraNeural"
+    },
+    "en": {
+        "name": "English",
+        "male": "en-US-ChristopherNeural",
+        "female": "en-US-JennyNeural"
+    }
 }
 
 user_data = {}
 last_update_time = {}
 
 # =====================================================================
-# ৩. হেল্পার ফাংশন
+# ৩. ডাবিং ইঞ্জিন ফাংশন
 # =====================================================================
-def get_video_duration(file_path):
+def get_media_duration(file_path):
     try:
         cmd = [FFMPEG_PATH, "-i", file_path]
         result = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
@@ -90,100 +101,76 @@ async def progress_bar(current, total, message, action_name):
 
     last_update_time[msg_id] = now
     percentage = (current / total) * 100
-    bar_length = 10
-    filled = int((current / total) * bar_length)
-    bar = "▰" * filled + "▱" * (bar_length - filled)
-
-    current_mb = current / (1024 * 1024)
-    total_mb = total / (1024 * 1024)
-
-    text = (
-        f"⏳ **{action_name}...**\n\n"
-        f"[{bar}] {percentage:.1f}%\n"
-        f"📊 সাইজ: {current_mb:.1f} MB / {total_mb:.1f} MB"
-    )
+    bar = "▰" * int((current / total) * 10) + "▱" * (10 - int((current / total) * 10))
 
     try:
-        await message.edit_text(text)
+        await message.edit_text(
+            f"⏳ **{action_name}...**\n\n[{bar}] {percentage:.1f}%\n"
+            f"📊 সাইজ: {current / (1024*1024):.1f} MB / {total / (1024*1024):.1f} MB"
+        )
     except Exception:
         pass
 
-# 🧠 Google Gemini 1.5 দিয়ে মাল্টি-স্পিকার শনাক্ত ও অনুবাদ
-def analyze_and_translate_with_gemini(audio_path, target_lang):
-    target_name = LANG_NAMES.get(target_lang, "Bengali")
-
-    # অডিও ফাইল সরাসরি জেমিনিতে আপলোড
+# 🧠 এআই দিয়ে ক্যারেক্টার ও ডায়ালগ অনুবাদ
+def analyze_and_translate_audio(audio_path, target_lang):
+    target_name = VOICE_MAP.get(target_lang, {}).get("name", "Bengali")
+    
     gemini_file = genai.upload_file(path=audio_path)
     model = genai.GenerativeModel("gemini-1.5-flash")
 
     prompt = f"""
-    You are an expert film dubber. Listen to this audio carefully:
-    1. Identify all speakers and determine their gender ('male' or 'female').
-    2. Translate their spoken dialogues strictly into {target_name}. Keep it natural for spoken speech.
-    3. Return ONLY a valid JSON list without any extra text or markdown formatting:
+    You are a professional film dubbing director. 
+    Analyze the speech in this audio clip:
+    1. Identify all speakers and classify each dialogue as 'male' or 'female'.
+    2. Accurately translate their dialogues into {target_name}. 
+    3. Make sure the translated lines sound completely natural for human speech.
+    4. Return strictly a JSON array without markdown formatting:
     [
-      {{"gender": "male", "text": "translated dialogue..."}},
-      {{"gender": "female", "text": "translated dialogue..."}}
+      {{"gender": "male", "text": "অনূদিত ডায়ালগ..."}},
+      {{"gender": "female", "text": "অনূদিত ডায়ালগ..."}}
     ]
     """
 
     response = model.generate_content([gemini_file, prompt])
     text = response.text.strip()
 
-    # JSON ক্লিনিং
     if text.startswith("```json"):
         text = text[7:]
     if text.startswith("```"):
         text = text[3:]
     if text.endswith("```"):
         text = text[:-3]
-    
+
     try:
         return json.loads(text.strip())
     except Exception:
-        # ব্যাকআপ যদি সরাসরি টেক্সট দেয়
         return [{"gender": "male", "text": text.replace('"', '').strip()}]
 
-# 🎙️ ছেলে ও মেয়ের আলাদা কণ্ঠ তৈরি
-def generate_multispeaker_audio(dialogues, target_lang, output_file, base_dir):
+# 🎙️ একাধিক চরিত্রের জন্য হাই-কোয়ালিটি ভয়েস তৈরি
+async def generate_multispeaker_audio(dialogues, target_lang, output_file, base_dir):
     temp_files = []
-    
+    lang_info = VOICE_MAP.get(target_lang, VOICE_MAP["bn"])
+
     for idx, item in enumerate(dialogues):
         gender = item.get("gender", "male").lower()
         dialogue_text = item.get("text", "")
         if not dialogue_text:
             continue
 
-        raw_tts_file = os.path.join(base_dir, f"seg_{idx}_raw.mp3")
-        final_seg_file = os.path.join(base_dir, f"seg_{idx}.mp3")
+        seg_file = os.path.join(base_dir, f"seg_{idx}.mp3")
+        voice_to_use = lang_info["female"] if "female" in gender else lang_info["male"]
 
-        # বেস ভয়েস তৈরি
-        tts = gTTS(text=dialogue_text, lang=target_lang, slow=False)
-        tts.save(raw_tts_file)
+        # ন্যাচারাল নিউরাল ভয়েসে ডাব তৈরি
+        communicate = edge_tts.Communicate(dialogue_text, voice_to_use)
+        await communicate.save(seg_file)
+        temp_files.append(seg_file)
 
-        # 🎭 ছেলেদের জন্য গম্ভীর পুরুষালি কণ্ঠ, মেয়েদের জন্য মিষ্টি নারী কণ্ঠ
-        if "male" in gender:
-            # পিচ নামিয়ে পুরুষের ভরাট কণ্ঠ করা
-            subprocess.run([
-                FFMPEG_PATH, "-y", "-i", raw_tts_file,
-                "-af", "asetrate=24000*0.82,atempo=1.22,bass=g=4",
-                final_seg_file
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            # স্বাভাবিক নারী কণ্ঠ
-            subprocess.run([
-                FFMPEG_PATH, "-y", "-i", raw_tts_file,
-                "-af", "asetrate=24000*1.05,atempo=0.95",
-                final_seg_file
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not temp_files:
+        raise Exception("কোনো ডাবিং অডিও তৈরি হয়নি!")
 
-        temp_files.append(final_seg_file)
-        if os.path.exists(raw_tts_file):
-            os.remove(raw_tts_file)
-
-    # সব সংলাপ জোড়া দিয়ে একটি ফুল অডিও ট্র্যাক বানানো
+    # অডিও ট্র্যাকগুলো জোড়া লাগানো
     concat_list = os.path.join(base_dir, "concat_list.txt")
-    with open(concat_list, "w") as f:
+    with open(concat_list, "w", encoding="utf-8") as f:
         for t_file in temp_files:
             f.write(f"file '{t_file}'\n")
 
@@ -192,7 +179,6 @@ def generate_multispeaker_audio(dialogues, target_lang, output_file, base_dir):
         "-i", concat_list, "-c", "copy", output_file
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # ক্লিনআপ
     for t_file in temp_files:
         if os.path.exists(t_file):
             os.remove(t_file)
@@ -204,7 +190,7 @@ def generate_multispeaker_audio(dialogues, target_lang, output_file, base_dir):
 # =====================================================================
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 স্বাগতম! আমি Google AI Studio চালিত মাল্টি-ভয়েস ডাবিং বট।\nভিডিও পাঠান, আমি ছেলে ও মেয়ের আলাদা আলাদা কণ্ঠে ডাব করে দেব।")
+    await message.reply_text("👋 স্বাগতম! ১ থেকে ৩ মিনিটের যেকোনো ভিডিও পাঠান, আমি ছেলে ও মেয়ের কণ্ঠ আলাদা করে সম্পূর্ণ ডাব করে দেব।")
 
 @app.on_message(filters.video | filters.document)
 async def handle_video(client, message):
@@ -212,11 +198,7 @@ async def handle_video(client, message):
     if not file.file_name and not message.video:
         return
 
-    if file.file_size > 1900 * 1024 * 1024:
-        await message.reply_text("⚠️ ফাইলটি অনেক বড়! ২ জিবির নিচের ভিডিও পাঠান।")
-        return
-
-    msg = await message.reply_text("⏳ ডাউনলোডের প্রস্তুতি নেওয়া হচ্ছে...")
+    msg = await message.reply_text("⏳ ভিডিও ডাউনলোড হচ্ছে...")
     user_id = str(message.from_user.id)
     target_path = os.path.abspath(f"{user_id}_input.mp4")
 
@@ -224,7 +206,7 @@ async def handle_video(client, message):
         message, 
         file_name=target_path,
         progress=progress_bar,
-        progress_args=(msg, "ভিডিও ডাউনলোড হচ্ছে")
+        progress_args=(msg, "ডাউনলোড চলছে")
     )
     user_data[user_id] = os.path.abspath(downloaded_path)
 
@@ -233,7 +215,7 @@ async def handle_video(client, message):
          InlineKeyboardButton("🇮🇳 হিন্দি", callback_data="hi"),
          InlineKeyboardButton("🇺🇸 ইংরেজি", callback_data="en")]
     ])
-    await msg.edit_text("✅ ডাউনলোড সম্পূর্ণ!\nএখন কোন ভাষায় ডাব করতে চান সিলেক্ট করুন:", reply_markup=markup)
+    await msg.edit_text("✅ ডাউনলোড সম্পূর্ণ!\nকোন ভাষায় ডাব করতে চান সিলেক্ট করুন:", reply_markup=markup)
 
 @app.on_callback_query()
 async def process_dubbing(client, callback_query):
@@ -241,42 +223,43 @@ async def process_dubbing(client, callback_query):
     target_lang = callback_query.data
 
     if user_id not in user_data:
-        await callback_query.message.edit_text("❌ ফাইল পাওয়া যায়নি! আবার ভিডিও পাঠান।")
+        await callback_query.message.edit_text("❌ ফাইল পাওয়া যায়নি! দয়া করে আবার ভিডিও পাঠান।")
         return
 
     input_video = user_data[user_id]
     base_dir = os.path.dirname(input_video)
-    extracted_audio = os.path.join(base_dir, f"{user_id}_audio.mp3")
-    tts_audio = os.path.join(base_dir, f"{user_id}_tts.mp3")
-    final_video = os.path.join(base_dir, f"{user_id}_dubbed.mp4")
+    extracted_audio = os.path.join(base_dir, f"{user_id}_extracted.mp3")
+    dubbed_audio = os.path.join(base_dir, f"{user_id}_dubbed_audio.mp3")
+    final_video = os.path.join(base_dir, f"{user_id}_final_dubbed.mp4")
 
-    status_msg = await callback_query.message.edit_text("⚙️ ডাবিং শুরু হচ্ছে...")
+    status_msg = await callback_query.message.edit_text("⚙️ **ডাবিং প্রক্রিয়া শুরু হচ্ছে...**")
 
     try:
-        # ১. অরিজিনাল ভিডিওর দৈর্ঘ্য জানা
-        video_duration = get_video_duration(input_video)
+        video_duration = get_media_duration(input_video)
 
-        # ২. অডিও আলাদা করা
-        await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▱▱▱] ২৫%\n🔹 অডিও প্রসেস করা হচ্ছে...")
+        # ১. ভিডিও থেকে অডিও নিষ্কাশন
+        await status_msg.edit_text("⚙️ [▰▱▱▱] ২৫%\n🔹 অডিও আলাদা করা হচ্ছে...")
         subprocess.run([
             FFMPEG_PATH, "-y", "-i", input_video,
-            "-vn", "-ar", "16000", "-ac", "1", "-b:a", "48k",
+            "-vn", "-ar", "16000", "-ac", "1", "-b:a", "64k",
             extracted_audio
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # ৩. Google Gemini 1.5 দিয়ে ছেলে/মেয়ে চরিত্র ও সংলাপ শনাক্ত
-        await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▱▱] ৫০%\n🔹 Google AI চরিত্র ও ভাষা বিশ্লেষণ করছে...")
-        dialogues = analyze_and_translate_with_gemini(extracted_audio, target_lang)
+        # ২. চরিত্র বিশ্লেষণ ও ডায়ালগ রূপান্তর
+        await status_msg.edit_text("⚙️ [▰▰▱▱] ৫০%\n🔹 চরিত্র ও সংলাপ বিশ্লেষণ করা হচ্ছে...")
+        dialogues = analyze_and_translate_audio(extracted_audio, target_lang)
 
-        # ৪. ছেলে ও মেয়ের আলাদা কণ্ঠে অডিও তৈরি
-        await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▱] ৭৫%\n🔹 ছেলে ও মেয়ের আলাদা কণ্ঠে ডাবিং তৈরি হচ্ছে...")
-        generate_multispeaker_audio(dialogues, target_lang, tts_audio, base_dir)
+        # ৩. চরিত্র অনুযায়ী মানুষের কণ্ঠে ডাবিং তৈরি
+        await status_msg.edit_text("⚙️ [▰▰▰▱] ৭৫%\n🔹 ছেলে ও মেয়ের কণ্ঠে নতুন ডাব রেন্ডার হচ্ছে...")
+        await generate_multispeaker_audio(dialogues, target_lang, dubbed_audio, base_dir)
 
-        # ৫. সম্পূর্ণ ভিডিও রেন্ডারিং
-        await status_msg.edit_text("⚙️ **ডাবিং প্রসেসিং:**\n\n[▰▰▰▰] ৯০%\n🔹 সম্পূর্ণ ভিডিও জোড়া লাগানো হচ্ছে...")
+        # ৪. অরিজিনাল ভিডিওর সাথে নতুন ভয়েস নিখুঁতভাবে টাইমিং ম্যাচ করে জোড়া লাগানো
+        await status_msg.edit_text("⚙️ [▰▰▰▰] ৯০%\n🔹 সম্পূর্ণ ডাব করা ভিডিও একত্র করা হচ্ছে...")
+        
+        # টাইমিং ফিট করা (ভিডিওর সমান অডিও বানানো)
         if video_duration:
             subprocess.run([
-                FFMPEG_PATH, "-y", "-i", input_video, "-i", tts_audio,
+                FFMPEG_PATH, "-y", "-i", input_video, "-i", dubbed_audio,
                 "-filter_complex", f"[1:a]apad=whole_dur={video_duration}[a]",
                 "-map", "0:v:0", "-map", "[a]",
                 "-c:v", "copy", "-c:a", "aac",
@@ -284,17 +267,17 @@ async def process_dubbing(client, callback_query):
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             subprocess.run([
-                FFMPEG_PATH, "-y", "-i", input_video, "-i", tts_audio,
+                FFMPEG_PATH, "-y", "-i", input_video, "-i", dubbed_audio,
                 "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0",
                 final_video
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # ৬. টেলিগ্রামে আপলোড
-        await status_msg.edit_text("🚀 ভিডিও প্রস্তুত! টেলিগ্রামে পাঠানো হচ্ছে...")
+        # ৫. টেলিগ্রামে ভিডিও পাঠানো
+        await status_msg.edit_text("🚀 ভিডিও তৈরি সম্পন্ন! টেলিগ্রামে পাঠানো হচ্ছে...")
         await client.send_video(
             chat_id=callback_query.message.chat.id,
             video=final_video,
-            caption="🎉 **Google AI Studio দ্বারা মাল্টি-ভয়েস ডাবিং সম্পন্ন হয়েছে!**",
+            caption=f"🎉 **{VOICE_MAP.get(target_lang, {}).get('name', '')} ডাবিং সম্পন্ন হয়েছে!**",
             supports_streaming=True,
             progress=progress_bar,
             progress_args=(status_msg, "ভিডিও আপলোড হচ্ছে")
@@ -304,7 +287,8 @@ async def process_dubbing(client, callback_query):
         await callback_query.message.reply_text(f"❌ এরর: {str(e)}")
 
     finally:
-        for path in [input_video, extracted_audio, tts_audio, final_video]:
+        # ফাইল পরিষ্কার করা যাতে Koyeb সার্ভার জ্যাম না হয়
+        for path in [input_video, extracted_audio, dubbed_audio, final_video]:
             if os.path.exists(path):
                 try:
                     os.remove(path)
@@ -317,5 +301,5 @@ async def process_dubbing(client, callback_query):
         except Exception:
             pass
 
-print("🚀 Google AI Studio চালিত মাল্টি-ভয়েস ডাবিং বট চালু হয়েছে...")
+print("🚀 ডাবিং বট চালু হয়েছে...")
 app.run()
